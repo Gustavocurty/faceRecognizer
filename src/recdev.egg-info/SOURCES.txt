@@ -1,0 +1,15 @@
+README.txt
+pyproject.toml
+src/recdev/__init__.py
+src/recdev/__main__.py
+src/recdev/classifier.py
+src/recdev/cli.py
+src/recdev/embeddings.py
+src/recdev/evaluation.py
+src/recdev/manifest.py
+src/recdev/preprocessing.py
+src/recdev.egg-info/PKG-INFO
+src/recdev.egg-info/SOURCES.txt
+src/recdev.egg-info/dependency_links.txt
+src/recdev.egg-info/requires.txt
+src/recdev.egg-info/top_level.txt

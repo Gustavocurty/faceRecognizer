@@ -1,0 +1,11 @@
+path,dataset,identity_original,identity_index,photo_id,source_photo,condition,sha256,split_group,fei_name
+very-easy/11-1.jpg,very-easy,11,0,1,a,clean,6a6e29e17db5010f4021a68c8400b2e5b9d0eacfe5784d316acb06cff45ffbe1,11-a,11a.jpg
+very-easy/11-2.jpg,very-easy,11,0,2,b,clean,9f37249705a9cf444fad1061b7a373780a45b1bf0a5066e39fa12aabc86dee11,11-b,11b.jpg
+very-easy/15-1.jpg,very-easy,15,1,1,b,clean,75e23ce8cbe57b71eb8aba9ea6401b2025be104edcb382b25ddbd3613113ad50,15-b,15b.jpg
+very-easy/15-2.jpg,very-easy,15,1,2,a,clean,762aaf0a245e0ef0ed2d38532e3784fc33ca1f20c29d082112dd25d43c81c773,15-a,15a.jpg
+very-easy/16-1.jpg,very-easy,16,2,1,a,clean,7baac46c753100d0cd07cd45572611e42b94f51aea9d7fafedc38eed8a9aa212,16-a,16a.jpg
+very-easy/16-2.jpg,very-easy,16,2,2,b,clean,060f5da4c4a4e973cfe24db93cf3ce319c61a881b3a68f8a74414e822c40297f,16-b,16b.jpg
+very-easy/2-1.jpg,very-easy,2,3,1,b,clean,874f93cef3305254c7e488a1fdcfec3478667a7666df0c95390f3649a09105fe,2-b,2b.jpg
+very-easy/2-2.jpg,very-easy,2,3,2,a,clean,a3fb54413073453c10416878545e7d6e0e952a46d6fbfe27fafe953d4dbcc739,2-a,2a.jpg
+very-easy/87-1.jpg,very-easy,87,4,1,a,clean,1c6bce814d688c3d0cb857b796b5b04e6024b80a32dcff1e5fd2dc87b568fc5c,87-a,87a.jpg
+very-easy/87-2.jpg,very-easy,87,4,2,b,clean,de692d1172b97cee7a6d0ca7f4258a01e654cae03d74b03103c094e642d36dfe,87-b,87b.jpg

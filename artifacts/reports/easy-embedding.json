@@ -1,0 +1,64 @@
+{
+  "dataset": "easy",
+  "method": "embedding",
+  "accuracy_mean": 1.0,
+  "n_folds": 8,
+  "folds": [
+    {
+      "fold": "A: a-gallery",
+      "condition": "clean",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 162.56
+    },
+    {
+      "fold": "A: a-gallery",
+      "condition": "dark",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 164.27
+    },
+    {
+      "fold": "A: a-gallery",
+      "condition": "noise",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 162.91
+    },
+    {
+      "fold": "A: a-gallery",
+      "condition": "noise-dark",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 161.58
+    },
+    {
+      "fold": "B: b-gallery",
+      "condition": "clean",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 162.72
+    },
+    {
+      "fold": "B: b-gallery",
+      "condition": "dark",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 161.18
+    },
+    {
+      "fold": "B: b-gallery",
+      "condition": "noise",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 158.42
+    },
+    {
+      "fold": "B: b-gallery",
+      "condition": "noise-dark",
+      "n_queries": 5,
+      "accuracy": 1.0,
+      "elapsed_ms": 162.84
+    }
+  ]
+}
