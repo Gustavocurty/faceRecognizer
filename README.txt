@@ -35,14 +35,18 @@ IMPLEMENTAÇÃO
                        linhagem foto-base (a/b), condição fotométrica, SHA-256
     preprocessing.py   RGB, resize 160x160, normalização do facenet
     classifier.py      PixelBaseline (L2), PCABaseline (PCA+whiten),
-                       EmbeddingClassifier (cosseno, nn/centroid)
-    embeddings.py      InceptionResnetV1 pré-treinada VGGFace2 (congelada)
-    evaluation.py      protocolos de avaliação sem vazamento
-    cli.py             CLI: audit / evaluate / identify
+                       EmbeddingClassifier (cosseno, nn/centroid, limiar
+                       open-set), calibração de limiar
+    embeddings.py      InceptionResnetV1 pré-treinada VGGFace2 (congelada),
+                       dispositivo auto-detectado, MTCNN opcional
+    evaluation.py      protocolos de avaliação sem vazamento, CMC,
+                       matriz de confusão, margem, calibração de limiar
+    cli.py             CLI: audit / evaluate / compare / identify
 
   Abordagem: embeddings faciais pré-treinados + similaridade de cosseno.
   Nenhum treinamento do zero (datasets pequenos demais); o backbone fica
-  congelado e a identificação é por nearest-neighbor ou centroide.
+  congelado e a identificação é por nearest-neighbor ou centroide, com
+  opção de rejeição de desconhecidos (open-set) por limiar de cosseno.
 
 
 PROTOCOLO DE AVALIAÇÃO (SEM VAZAMENTO)
@@ -90,16 +94,38 @@ USO
     python3 -m recdev audit --dataset very-easy
     python3 -m recdev audit --dataset easy
 
-  Avaliação com relatório JSON (artifacts/reports/*.json):
+  Avaliação com relatório JSON (artifacts/reports/*.json). O relatório inclui
+  acurácia, CMC (rank-1/rank-5), margem média e matriz de confusão por fold:
 
     python3 -m recdev evaluate --dataset very-easy --method embedding
     python3 -m recdev evaluate --dataset easy --method pixels
     # métodos: pixels | pca | embedding | embedding-centroid
 
+  Rejeição de desconhecidos (open-set): calibra um limiar de cosseno a
+  partir do quantil inferior das similaridades de acertos (default 5%) e
+  reavalia com rejeição:
+
+    python3 -m recdev evaluate --dataset easy --method embedding --reject
+    # --quantile ajusta o quantil do limiar (default 0.05)
+
+  Comparação lado a lado nn vs centroid (artifacts/reports/*-compare.json):
+
+    python3 -m recdev compare --dataset easy
+
   Identificação de uma imagem (imprime identidade, similaridade,
   segundo colocado e margem; salva a galeria em artifacts/models/):
 
     python3 -m recdev identify --gallery easy --image caminho/para/foto.jpg
+
+  Com limiar, consultas abaixo do cosseno informado são "desconhecidas":
+
+    python3 -m recdev identify --gallery easy --image foto.jpg --threshold 0.7
+
+  Com detecção facial (MTCNN), aceita fotos arbitrárias fora do padrão
+  100x100 (ex.: extras/); o rosto é detectado, alinhado e recortado antes
+  do embedding. Dispositivo é auto-detectado (CUDA > MPS > CPU):
+
+    python3 -m recdev identify --gallery easy --image foto.jpg --detect
 
   Testes:
 
@@ -109,22 +135,22 @@ USO
 ESTRUTURA
 
     src/recdev/         código do reconhecedor
-    tests/              23 testes (manifesto, splits, pré-processamento,
-                        classificadores)
+    tests/              35 testes (manifesto, splits, pré-processamento,
+                        classificadores, métricas, rejeição, cache)
     artifacts/
       manifests/        CSVs com linhagem completa de cada imagem
-      reports/          relatórios JSON de avaliação
+      reports/          relatórios JSON de avaliação e comparação
       models/           galerias de embeddings (identify)
-      embeddings/       cache de embeddings por dataset
+      embeddings/       cache de embeddings por dataset (fingerprint
+                        verificado contra alterações silenciosas)
 
 
 PRÓXIMOS PASSOS
 
   1. Incorporar medium (50 identidades) e hard (pose/expressão)
   2. Fine-tuning parcial vs congelamento
-  3. Detecção e alinhamento facial
-  4. Rejeição de desconhecidos (limiar) e verificação 1:1
-  5. Teste de mudança de domínio com extras/ (fotos naturais de Facebook)
+  3. Reavaliar limiar de rejeição com desconhecidos reais (fora da galeria)
+  4. Teste de mudança de domínio com extras/ (fotos naturais de Facebook)
 
   Notas: resultados refletem apenas estes dados controlados. IDs de datasets
   diferentes não devem ser misturados (namespaced). Dados biométricos:

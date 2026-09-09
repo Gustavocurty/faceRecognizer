@@ -1,0 +1,31 @@
+{
+  "dataset": "easy",
+  "methods": {
+    "embedding": {
+      "accuracy_mean": 1.0,
+      "cmc_mean": {
+        "1": 1.0,
+        "5": 1.0
+      },
+      "per_condition": {
+        "clean": 1.0,
+        "dark": 1.0,
+        "noise": 1.0,
+        "noise-dark": 1.0
+      }
+    },
+    "embedding-centroid": {
+      "accuracy_mean": 1.0,
+      "cmc_mean": {
+        "1": 1.0,
+        "5": 1.0
+      },
+      "per_condition": {
+        "clean": 1.0,
+        "dark": 1.0,
+        "noise": 1.0,
+        "noise-dark": 1.0
+      }
+    }
+  }
+}

@@ -1,8 +1,9 @@
-"""CLI do recdev: auditoria, avaliação e identificação.
+"""CLI do recdev: auditoria, avaliação, comparação e identificação.
 
 Comandos:
     audit      - constrói o manifesto e audita um dataset
     evaluate   - roda o protocolo de avaliação com um método
+    compare    - compara embedding (nn) vs embedding-centroid
     identify   - classifica uma imagem contra a galeria de um dataset
 """
 
@@ -15,11 +16,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .classifier import EmbeddingClassifier, PixelBaseline
+from .classifier import UNKNOWN_LABEL, EmbeddingClassifier, PixelBaseline
 from .embeddings import MODEL_NAME, FaceEmbedder, EmbeddingCache
 from .evaluation import (
     EvalReport,
     build_classifier_for,
+    calibrate_threshold_from_folds,
     evaluate_easy,
     evaluate_very_easy,
     set_active_method,
@@ -112,18 +114,66 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     if args.method.startswith("embedding"):
         embedder = FaceEmbedder()
 
-    if args.dataset == "very-easy":
-        folds = evaluate_very_easy(manifest, _featurizer_for(args.method, embedder))
-    elif args.dataset == "easy":
-        folds = evaluate_easy(manifest, _featurizer_for(args.method, embedder))
-    else:
-        print(f"Dataset ainda não suportado: {args.dataset}", file=sys.stderr)
-        return 2
+    evaluate = (
+        evaluate_very_easy if args.dataset == "very-easy" else evaluate_easy
+    )
+    featurizer = _featurizer_for(args.method, embedder)
+
+    # Passada fechada (sem limiar); com --reject, calibra e reavalia open-set.
+    folds = evaluate(manifest, featurizer)
+    extra: dict = {}
+    if args.reject:
+        threshold = calibrate_threshold_from_folds(folds, quantile=args.quantile)
+        folds = evaluate(manifest, featurizer, threshold=threshold)
+        extra["rejection"] = {
+            "threshold": round(threshold, 4),
+            "quantile": args.quantile,
+            "rejected": sum(
+                1 for f in folds for p in f.predictions if p.label == UNKNOWN_LABEL
+            ),
+            "n_queries": sum(len(f.predictions) for f in folds),
+        }
 
     report = EvalReport(dataset=args.dataset, method=args.method, folds=folds)
-    path = _save_report(report)
+    path = _save_report(report, extra)
     print(json.dumps(report.summary(), indent=2, ensure_ascii=False))
+    if extra:
+        print(f"\nRejeição open-set: {json.dumps(extra['rejection'], ensure_ascii=False)}")
     print(f"\nRelatório salvo em: {path}")
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Avalia embedding (nn) vs embedding-centroid no mesmo protocolo."""
+    manifest = build_manifest(args.dataset, ROOT)
+    embedder = FaceEmbedder()
+    evaluate = (
+        evaluate_very_easy if args.dataset == "very-easy" else evaluate_easy
+    )
+    featurizer = _featurizer_for("embedding", embedder)
+
+    comparison: dict = {"dataset": args.dataset, "methods": {}}
+    for method in ("embedding", "embedding-centroid"):
+        set_active_method(method)
+        folds = evaluate(manifest, featurizer)
+        report = EvalReport(dataset=args.dataset, method=method, folds=folds)
+        _save_report(report)
+        per_cond = {
+            f.condition: round(f.accuracy, 4)
+            for f in folds
+        }
+        comparison["methods"][method] = {
+            "accuracy_mean": round(report.accuracy, 4),
+            "cmc_mean": {str(k): round(v, 4) for k, v in report.cmc.items()},
+            "per_condition": per_cond,
+        }
+
+    out_dir = ROOT / "artifacts" / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{args.dataset}-compare.json"
+    path.write_text(json.dumps(comparison, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(comparison, indent=2, ensure_ascii=False))
+    print(f"\nComparação salva em: {path}")
     return 0
 
 
@@ -153,14 +203,20 @@ def cmd_identify(args: argparse.Namespace) -> int:
     cache_path = cache_dir / f"{args.gallery}-gallery.pt"
     embedder_cache.save(cache_path)
 
-    clf = EmbeddingClassifier(mode="nn").fit(
+    clf = EmbeddingClassifier(mode="nn", threshold=args.threshold).fit(
         embedder_cache.embeddings,
         np.array([r.identity_index for r in gallery_recs]),
     )
 
-    query_emb = embedder.embed_files([args.image], Path("."))[0]
-    (pred,) = clf.predict(query_emb[None, :])
+    query_emb = embedder.embed_image(args.image, detect=args.detect)[None, :]
+    (pred,) = clf.predict(query_emb)
     ident_map = {r.identity_index: r.identity_original for r in gallery_recs}
+
+    if pred.label == UNKNOWN_LABEL:
+        print("Identidade: desconhecida (abaixo do limiar)")
+        print(f"Similaridade: {pred.similarity:.4f} < limiar {args.threshold:.4f}")
+        print(f"Melhor candidato da galeria: {ident_map.get(pred.ranking[0], '?') if pred.ranking else '?'}")
+        return 0
 
     print(f"Identidade: {ident_map[pred.label]}")
     print(f"Similaridade: {pred.similarity:.4f}")
@@ -184,11 +240,39 @@ def main(argv: list[str] | None = None) -> int:
         default="embedding",
         choices=["pixels", "pca", "embedding", "embedding-centroid"],
     )
+    p_eval.add_argument(
+        "--reject",
+        action="store_true",
+        help="rejeição de desconhecidos: calibra limiar e reavalia open-set",
+    )
+    p_eval.add_argument(
+        "--quantile",
+        type=float,
+        default=0.05,
+        help="quantil para calibrar o limiar (default 0.05)",
+    )
     p_eval.set_defaults(func=cmd_evaluate)
+
+    p_cmp = sub.add_parser(
+        "compare", help="compara embedding (nn) vs embedding-centroid"
+    )
+    p_cmp.add_argument("--dataset", required=True, choices=["very-easy", "easy"])
+    p_cmp.set_defaults(func=cmd_compare)
 
     p_ident = sub.add_parser("identify", help="identifica uma imagem")
     p_ident.add_argument("--gallery", required=True, choices=["very-easy", "easy"])
     p_ident.add_argument("--image", required=True)
+    p_ident.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="limiar de cosseno; abaixo dele a imagem é 'desconhecida'",
+    )
+    p_ident.add_argument(
+        "--detect",
+        action="store_true",
+        help="detecta e alinha o rosto com MTCNN (para fotos arbitrárias)",
+    )
     p_ident.set_defaults(func=cmd_identify)
 
     args = parser.parse_args(argv)

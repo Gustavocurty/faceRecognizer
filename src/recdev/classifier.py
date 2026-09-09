@@ -7,9 +7,12 @@ ou similaridade de cosseno (embeddings).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+
+# Rótulo retornado quando a similaridade fica abaixo do limiar (open-set).
+UNKNOWN_LABEL = -1
 
 
 @dataclass
@@ -18,6 +21,7 @@ class Prediction:
     similarity: float  # maior similaridade (ou -distância) com a galeria
     runner_up: int  # segunda identidade mais provável
     runner_up_similarity: float
+    ranking: list[int] = field(default_factory=list)  # identidades por score decrescente (para CMC)
 
 
 class PixelBaseline:
@@ -50,6 +54,17 @@ class PixelBaseline:
         preds: list[Prediction] = []
         for row in scores:
             order = np.argsort(-row if maximize else row)
+            # Ranking de identidades (sem repetição) por score decrescente,
+            # usado para CMC (rank-k). Distância: ordem inversa.
+            ranking: list[int] = []
+            identity_rank: dict[int, float] = {}
+            for i in order:
+                lab = int(labels[i])
+                score = float(row[i])
+                if lab not in identity_rank or (maximize and score > identity_rank[lab]):
+                    identity_rank[lab] = score
+                if lab not in ranking:
+                    ranking.append(lab)
             best = order[0]
             label = int(labels[best])
             # Segundo colocado: melhor score com rótulo diferente do vencedor.
@@ -61,6 +76,7 @@ class PixelBaseline:
                     similarity=float(row[best]),
                     runner_up=int(labels[runner]),
                     runner_up_similarity=float(row[runner]),
+                    ranking=ranking,
                 )
             )
         return preds
@@ -91,12 +107,18 @@ class EmbeddingClassifier:
 
     mode="nn": compara com cada imagem da galeria (nearest neighbor).
     mode="centroid": compara com o centroide L2-normalizado por identidade.
+
+    Com threshold > 0 (open-set), consultas com similaridade abaixo do
+    limiar são rejeitadas como desconhecidas (label = UNKNOWN_LABEL).
     """
 
-    def __init__(self, mode: str = "nn") -> None:
+    def __init__(self, mode: str = "nn", threshold: float | None = None) -> None:
         if mode not in ("nn", "centroid"):
             raise ValueError(f"mode inválido: {mode!r}")
+        if threshold is not None and threshold <= 0.0:
+            raise ValueError(f"threshold deve ser > 0 (ou None): {threshold!r}")
         self.mode = mode
+        self.threshold = threshold
         self._features: np.ndarray | None = None
         self._labels: np.ndarray | None = None
 
@@ -115,10 +137,28 @@ class EmbeddingClassifier:
         assert self._features is not None
         q = _l2_normalize(np.asarray(features, dtype=np.float32))
         sim = q @ self._features.T  # cosseno
-        return PixelBaseline._nearest(self, sim, maximize=True)
+        preds = PixelBaseline._nearest(self, sim, maximize=True)
+        if self.threshold is not None:
+            for p in preds:
+                if p.similarity < self.threshold:
+                    p.label = UNKNOWN_LABEL
+        return preds
 
 
 def _l2_normalize(x: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(x, axis=-1, keepdims=True)
     norm = np.maximum(norm, 1e-12)
     return x / norm
+
+
+def calibrate_threshold(similarities: list[float], quantile: float = 0.05) -> float:
+    """Limiar de rejeição a partir das similaridades de acertos conhecidos.
+
+    Usa o quantil inferior das similaridades observadas (default 5%):
+    consultas abaixo desse valor têm alta chance de serem fora-da-galeria.
+    """
+    if not similarities:
+        raise ValueError("Nenhuma similaridade para calibrar")
+    if not 0.0 < quantile < 1.0:
+        raise ValueError(f"quantile deve estar em (0, 1): {quantile!r}")
+    return float(np.quantile(np.asarray(similarities, dtype=np.float32), quantile))
