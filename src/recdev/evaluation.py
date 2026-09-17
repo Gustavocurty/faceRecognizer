@@ -1,15 +1,4 @@
-"""Protocolos de avaliação sem vazamento para very-easy e easy.
-
-very-easy: avaliação bidirecional (fold A: foto 1 -> galeria, foto 2 ->
-teste; fold B: o inverso).
-
-easy: folds por fotografia-base (a vs b), nunca por arquivo, para que
-variantes dark/noise da mesma foto-base nunca atravessem galeria/teste.
-A galeria usa apenas a versão clean; as consultas cobrem as 4 condições.
-
-O ``featurizer`` é um callable ``Record -> np.ndarray`` injetado pelo
-chamador, permitindo trocar entre baselines de pixels e embeddings.
-"""
+"""Avaliação fechada com splits explícitos, métricas e diagnóstico numérico."""
 
 from __future__ import annotations
 
@@ -19,14 +8,12 @@ from typing import Callable
 
 import numpy as np
 
-from .classifier import (
-    UNKNOWN_LABEL,
-    EmbeddingClassifier,
-    PCABaseline,
-    PixelBaseline,
-    Prediction,
-)
+from .classifier import UNKNOWN_LABEL, Prediction, calibrate_threshold
+from .config import MethodConfig
 from .manifest import Manifest, Record
+from .pipeline import RecognitionModel
+from .protocols import PROTOCOL_VERSION, Split, make_splits
+from .reduction import SVDPCA
 
 Featurizer = Callable[[Record], np.ndarray]
 
@@ -40,43 +27,51 @@ class FoldResult:
     true_identities: list[str]
     identity_by_index: dict[int, str]
     elapsed_ms: float
-    threshold: float | None = None  # limiar de rejeição (None = fechado)
+    threshold: float | None = None
+    paths: list[str] = field(default_factory=list)
+    timings: dict = field(default_factory=dict)
+    diagnostics: dict = field(default_factory=dict)
 
     @property
-    def accuracy(self) -> float:
-        if not self.predictions:
-            return 0.0
-        hits = sum(1 for p, t in zip(self.predictions, self.true_labels) if p.label == t)
-        return hits / len(self.predictions)
+    def hits(self):
+        return sum(p.label == truth for p, truth in zip(self.predictions, self.true_labels))
 
     @property
-    def margin(self) -> list[float]:
-        """Similaridade do vencedor menos a do 2º colocado, por consulta."""
+    def accuracy(self):
+        return self.hits / len(self.predictions) if self.predictions else 0.0
+
+    @property
+    def margin(self):
         return [p.similarity - p.runner_up_similarity for p in self.predictions]
 
     @property
-    def cmc(self) -> dict[int, float]:
-        """Curva CMC: fração de consultas com a verdade no rank-k."""
-        ranks: dict[int, int] = {k: 0 for k in (1, 5)}
-        for p, t in zip(self.predictions, self.true_labels):
-            for k in ranks:
-                if p.ranking and t in p.ranking[:k]:
-                    ranks[k] += 1
-        n = len(self.predictions) or 1
-        return {k: v / n for k, v in ranks.items()}
+    def cmc(self):
+        # Ranking é pré-rejeição: rank-1 pode diferir da acurácia com limiar.
+        return {k: sum(t in p.ranking[:k] for p, t in zip(self.predictions, self.true_labels)) / (len(self.predictions) or 1)
+                for k in (1, 5)}
 
-    def confusion(self) -> dict[str, dict[str, int]]:
-        """Matriz de confusão {verdadeiro: {previsto: contagem}} (nomes originais)."""
-        matrix: dict[str, dict[str, int]] = {}
-        for p, t in zip(self.predictions, self.true_identities):
-            pred_name = (
-                self.identity_by_index.get(p.label, "unknown")
-                if p.label != UNKNOWN_LABEL
-                else "unknown"
-            )
-            matrix.setdefault(t, {}).setdefault(pred_name, 0)
-            matrix[t][pred_name] += 1
+    def confusion(self):
+        matrix = {}
+        for prediction, truth in zip(self.predictions, self.true_identities):
+            name = self.identity_by_index.get(prediction.label, "unknown")
+            matrix.setdefault(truth, {}).setdefault(name, 0)
+            matrix[truth][name] += 1
         return matrix
+
+    def summary(self):
+        return dict(
+            fold=self.fold, condition=self.condition, n_queries=len(self.predictions), hits=self.hits,
+            accuracy=self.accuracy, cmc={str(k): value for k, value in self.cmc.items()},
+            margin_mean=float(np.mean(self.margin)) if self.margin else 0.0,
+            threshold=self.threshold, rejected=sum(p.label == UNKNOWN_LABEL for p in self.predictions),
+            elapsed_ms=self.elapsed_ms, timings=self.timings, diagnostics=self.diagnostics,
+            confusion=self.confusion(),
+            queries=[dict(path=self.paths[i] if self.paths else None, truth=truth,
+                          predicted=self.identity_by_index.get(p.label, "unknown"),
+                          score=p.similarity, margin=p.similarity - p.runner_up_similarity,
+                          ranking=[self.identity_by_index[label] for label in p.ranking])
+                     for i, (p, truth) in enumerate(zip(self.predictions, self.true_identities))],
+        )
 
 
 @dataclass
@@ -84,158 +79,125 @@ class EvalReport:
     dataset: str
     method: str
     folds: list[FoldResult] = field(default_factory=list)
+    config: dict = field(default_factory=dict)
+    partition: str = "test"
+    fit_metrics: list[dict] = field(default_factory=list)
 
     @property
-    def accuracy(self) -> float:
-        if not self.folds:
-            return 0.0
-        return float(np.mean([f.accuracy for f in self.folds]))
+    def n_queries(self):
+        return sum(len(f.predictions) for f in self.folds)
 
     @property
-    def cmc(self) -> dict[int, float]:
-        """CMC média entre folds (rank-k)."""
-        if not self.folds:
-            return {}
-        ks = {k for f in self.folds for k in f.cmc}
-        return {
-            k: float(np.mean([f.cmc[k] for f in self.folds if k in f.cmc]))
-            for k in sorted(ks)
-        }
+    def accuracy(self):
+        return sum(f.hits for f in self.folds) / (self.n_queries or 1)
 
-    def summary(self) -> dict:
-        per_fold = [
-            {
-                "fold": f.fold,
-                "condition": f.condition,
-                "n_queries": len(f.predictions),
-                "accuracy": round(f.accuracy, 4),
-                "cmc": {str(k): round(v, 4) for k, v in f.cmc.items()},
-                "margin_mean": round(float(np.mean(f.margin)), 4) if f.margin else 0.0,
-                "threshold": f.threshold,
-                "elapsed_ms": round(f.elapsed_ms, 2),
-                "confusion": f.confusion(),
-            }
-            for f in self.folds
-        ]
-        return {
-            "dataset": self.dataset,
-            "method": self.method,
-            "accuracy_mean": round(self.accuracy, 4),
-            "cmc_mean": {str(k): round(v, 4) for k, v in self.cmc.items()},
-            "n_folds": len(self.folds),
-            "folds": per_fold,
-        }
+    @property
+    def cmc(self):
+        return {k: sum(f.cmc[k] * len(f.predictions) for f in self.folds) / (self.n_queries or 1) for k in (1, 5)}
+
+    def summary(self):
+        conditions = {}
+        confusion = {}
+        for fold in self.folds:
+            row = conditions.setdefault(fold.condition, dict(hits=0, n_queries=0))
+            row["hits"] += fold.hits
+            row["n_queries"] += len(fold.predictions)
+            for truth, counts in fold.confusion().items():
+                for prediction, count in counts.items():
+                    confusion.setdefault(truth, {}).setdefault(prediction, 0)
+                    confusion[truth][prediction] += count
+        for row in conditions.values():
+            row["accuracy"] = row["hits"] / row["n_queries"]
+        return dict(
+            dataset=self.dataset, method=self.method, config=self.config, partition=self.partition,
+            protocol=PROTOCOL_VERSION, accuracy_mean=self.accuracy,
+            hits=sum(f.hits for f in self.folds), n_queries=self.n_queries,
+            cmc_mean={str(k): v for k, v in self.cmc.items()},
+            rank5_informative=any(len(f.identity_by_index) > 5 for f in self.folds),
+            n_folds=len(self.folds), per_condition=conditions, confusion=confusion,
+            fits=self.fit_metrics, folds=[f.summary() for f in self.folds],
+        )
 
 
-def _run_fold(
-    fold_name: str,
-    condition: str,
-    gallery: list[Record],
-    queries: list[Record],
-    featurizer: Featurizer,
-    threshold: float | None = None,
-) -> FoldResult:
-    gallery_feats = np.stack([featurizer(rec) for rec in gallery])
-    gallery_labels = [rec.identity_index for rec in gallery]
-    classifier = build_classifier_for(featurizer, threshold).fit(gallery_feats, gallery_labels)
-
-    t0 = time.perf_counter()
-    query_feats = np.stack([featurizer(rec) for rec in queries])
-    predictions = classifier.predict(query_feats)
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-
-    identities = {
-        rec.identity_index: rec.identity_original for rec in gallery + queries
-    }
-    return FoldResult(
-        fold=fold_name,
-        condition=condition,
-        predictions=predictions,
-        true_labels=[rec.identity_index for rec in queries],
-        true_identities=[rec.identity_original for rec in queries],
-        identity_by_index=identities,
-        elapsed_ms=elapsed_ms,
-        threshold=threshold,
-    )
+def get_features(featurizer, records):
+    if hasattr(featurizer, "get"):
+        return featurizer.get(records)
+    return np.stack([featurizer(record) for record in records])
 
 
-# O classificador é escolhido conforme a natureza do featurizer.
-# Featurizers carregam seu método em ``set_active_method``.
-_active_method: str = "embedding"
+def fit_split(split: Split, featurizer, config: MethodConfig):
+    start = time.perf_counter()
+    features = get_features(featurizer, split.gallery)
+    gallery_features_ms = (time.perf_counter() - start) * 1000
+    model = RecognitionModel(config)
+    decomposition = None
+    fit_ms = 0.0
+    reused = False
+    if config.uses_pca and hasattr(featurizer, "decompositions"):
+        key = (tuple((r.path, r.sha256) for r in split.gallery), config.dtype)
+        decomposition = featurizer.decompositions.get(key)
+        reused = decomposition is not None
+        if decomposition is None:
+            start = time.perf_counter()
+            decomposition = SVDPCA(dtype=config.dtype).fit(model.prepare(features))
+            fit_ms = (time.perf_counter() - start) * 1000
+            featurizer.decompositions[key] = decomposition
+    model.fit(features, [r.identity_index for r in split.gallery], decomposition)
+    if decomposition is not None:
+        model.timings["pca_fit_ms"] += fit_ms
+        model.timings["svd_reused"] = reused
+    model.timings["gallery_features_ms"] = gallery_features_ms
+    return model
 
 
-def set_active_method(method: str) -> None:
-    global _active_method
-    _active_method = method
-
-
-def build_classifier_for(_featurizer: Featurizer, threshold: float | None = None):
-    method = _active_method
-    if method == "pixels":
-        return PixelBaseline()
-    if method == "pca":
-        return PCABaseline(n_components=20)
-    if method in ("embedding", "embedding-centroid"):
-        mode = "centroid" if method == "embedding-centroid" else "nn"
-        return EmbeddingClassifier(mode=mode, threshold=threshold)
-    raise ValueError(f"Método desconhecido: {method!r}")
-
-
-def evaluate_very_easy(manifest: Manifest, featurizer: Featurizer, threshold: float | None = None) -> list[FoldResult]:
-    """Dois folds: galeria = foto 1 / teste = foto 2, e o inverso."""
-    by_identity: dict[str, list[Record]] = {}
-    for rec in manifest.records:
-        by_identity.setdefault(rec.identity_original, []).append(rec)
-    # Ordena por photo_id para determinismo (foto 1 vs foto 2).
-    for recs in by_identity.values():
-        recs.sort(key=lambda r: r.photo_id)
-
-    gallery_a = [recs[0] for recs in by_identity.values()]
-    probe_a = [recs[1] for recs in by_identity.values()]
-
-    return [
-        _run_fold("A: photo1-gallery", "all", gallery_a, probe_a, featurizer, threshold),
-        _run_fold("B: photo2-gallery", "all", probe_a, gallery_a, featurizer, threshold),
-    ]
-
-
-def evaluate_easy(manifest: Manifest, featurizer: Featurizer, threshold: float | None = None) -> list[FoldResult]:
-    """Folds por foto-base a/b; 4 condições de consulta por fold."""
-    by_source: dict[str, list[Record]] = {"a": [], "b": []}
-    for rec in manifest.records:
-        by_source[rec.source_photo].append(rec)
-
-    folds: list[FoldResult] = []
-    for fold_name, gallery_source, probe_source in (
-        ("A: a-gallery", "a", "b"),
-        ("B: b-gallery", "b", "a"),
-    ):
-        gallery = [r for r in by_source[gallery_source] if r.condition == "clean"]
-        if not gallery:  # fallback defensivo
-            gallery = by_source[gallery_source]
-        by_cond: dict[str, list[Record]] = {}
-        for rec in by_source[probe_source]:
-            by_cond.setdefault(rec.condition, []).append(rec)
-        for cond in ("clean", "dark", "noise", "noise-dark"):
-            if cond in by_cond:
-                folds.append(
-                    _run_fold(fold_name, cond, gallery, by_cond[cond], featurizer, threshold)
-                )
+def score_records(model, split, records, featurizer, dataset):
+    folds = []
+    conditions = sorted({r.condition for r in records})
+    for condition in conditions:
+        queries = [r for r in records if r.condition == condition]
+        start = time.perf_counter()
+        features = get_features(featurizer, queries)
+        features_ms = (time.perf_counter() - start) * 1000
+        predictions, timings = model.predict_timed(features)
+        timings["query_features_ms"] = features_ms
+        identities = {r.identity_index: r.identity_original for r in split.gallery}
+        folds.append(FoldResult(
+            fold=split.name, condition="all" if dataset == "very-easy" else condition,
+            predictions=predictions, true_labels=[r.identity_index for r in queries],
+            true_identities=[r.identity_original for r in queries], identity_by_index=identities,
+            elapsed_ms=sum(timings.values()), threshold=model.config.threshold,
+            paths=[r.path for r in queries], timings=timings, diagnostics=model.diagnostics(features),
+        ))
     return folds
 
 
-def calibrate_threshold_from_folds(folds: list[FoldResult], quantile: float = 0.05) -> float:
-    """Calibra limiar de rejeição a partir das similaridades de acertos.
+def evaluate(manifest: Manifest, featurizer, config: MethodConfig,
+             partition="test", splits: list[Split] | None = None) -> EvalReport:
+    if partition not in ("test", "validation"):
+        raise ValueError("Partição deve ser test ou validation")
+    splits = make_splits(manifest) if splits is None else splits
+    report = EvalReport(manifest.dataset, config.method, config=config.to_dict(), partition=partition)
+    for split in splits:
+        split.validate()
+        queries = getattr(split, partition)
+        if not queries:
+            raise ValueError(f"{manifest.dataset} não possui partição {partition} independente")
+        model = fit_split(split, featurizer, config)
+        report.fit_metrics.append(dict(split=split.name, timings=model.timings, diagnostics=model.diagnostics()))
+        report.folds.extend(score_records(model, split, queries, featurizer, manifest.dataset))
+    return report
 
-    Coleta a similaridade vencedora de cada consulta bem classificada nos
-    folds de referência e devolve o quantil inferior (default 5%).
-    """
-    sims = [
-        p.similarity
-        for f in folds
-        for p, t in zip(f.predictions, f.true_labels)
-        if p.label == t
-    ]
-    from .classifier import calibrate_threshold
 
-    return calibrate_threshold(sims, quantile=quantile)
+def evaluate_very_easy(manifest, featurizer, threshold=None, config=None):
+    return evaluate(manifest, featurizer, config or MethodConfig(threshold=threshold)).folds
+
+
+def evaluate_easy(manifest, featurizer, threshold=None, config=None):
+    return evaluate(manifest, featurizer, config or MethodConfig(threshold=threshold)).folds
+
+
+def calibrate_threshold_from_folds(folds: list[FoldResult], quantile=0.05):
+    """O chamador deve fornecer apenas folds de VALIDAÇÃO independente."""
+    return calibrate_threshold([p.similarity for fold in folds
+                                for p, truth in zip(fold.predictions, fold.true_labels)
+                                if p.label == truth], quantile)

@@ -7,7 +7,6 @@ from recdev.classifier import UNKNOWN_LABEL, EmbeddingClassifier, calibrate_thre
 from recdev.evaluation import (
     evaluate_easy,
     evaluate_very_easy,
-    set_active_method,
 )
 from recdev.manifest import build_manifest
 
@@ -89,9 +88,9 @@ def test_unknown_passes_above_threshold():
 
 def test_invalid_threshold_raises():
     with pytest.raises(ValueError):
-        EmbeddingClassifier(mode="nn", threshold=0.0)
+        EmbeddingClassifier(mode="nn", threshold=1.01)
     with pytest.raises(ValueError):
-        EmbeddingClassifier(mode="nn", threshold=-0.5)
+        EmbeddingClassifier(mode="nn", threshold=-1.01)
 
 
 def test_calibrate_threshold_quantile():
@@ -106,9 +105,8 @@ def test_calibrate_threshold_quantile():
 
 def test_evaluate_with_threshold_rejects():
     manifest = build_manifest("very-easy", ROOT)
-    set_active_method("embedding")
-    # Limiar impossível (1.01) rejeita todas as consultas.
-    folds = evaluate_very_easy(manifest, ConstantFeaturizer(), threshold=1.01)
+    # Vetores nulos têm score zero; limiar positivo rejeita as consultas.
+    folds = evaluate_very_easy(manifest, lambda rec: np.zeros(8), threshold=0.5)
     for fold in folds:
         assert all(p.label == UNKNOWN_LABEL for p in fold.predictions)
         assert fold.accuracy == 0.0
@@ -118,7 +116,6 @@ def test_evaluate_with_threshold_rejects():
 
 def test_report_summary_includes_new_metrics():
     manifest = build_manifest("easy", ROOT)
-    set_active_method("embedding")
     folds = evaluate_easy(manifest, ConstantFeaturizer())
     from recdev.evaluation import EvalReport
 

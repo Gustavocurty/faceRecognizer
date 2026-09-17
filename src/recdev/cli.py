@@ -1,283 +1,244 @@
-"""CLI do recdev: auditoria, avaliação, comparação e identificação.
-
-Comandos:
-    audit      - constrói o manifesto e audita um dataset
-    evaluate   - roda o protocolo de avaliação com um método
-    compare    - compara embedding (nn) vs embedding-centroid
-    identify   - classifica uma imagem contra a galeria de um dataset
-"""
+"""RecDev: audit, evaluate, experiment/compare, enroll e identify."""
 
 from __future__ import annotations
 
 import argparse
-import json
-import sys
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
-
-from .classifier import UNKNOWN_LABEL, EmbeddingClassifier, PixelBaseline
-from .embeddings import MODEL_NAME, FaceEmbedder, EmbeddingCache
-from .evaluation import (
-    EvalReport,
-    build_classifier_for,
-    calibrate_threshold_from_folds,
-    evaluate_easy,
-    evaluate_very_easy,
-    set_active_method,
-)
-from .manifest import Manifest, audit, build_manifest, find_duplicates, check_subset
+from .artifacts import environment, new_run, write_json
+from .config import DATASETS, METHODS, MethodConfig
+from .evaluation import calibrate_threshold_from_folds, evaluate, fit_split
+from .experiments import DEFAULT_METHODS, run_experiment
+from .features import FeatureStore
+from .manifest import audit, build_manifest, check_subset
+from .pipeline import RecognitionModel
 from .preprocessing import load_pixels
+from .protocols import PROTOCOL_VERSION, make_splits
+from .reporting import export_experiment
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _save_report(report: EvalReport, extra: dict | None = None) -> Path:
-    out_dir = ROOT / "artifacts" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    payload = report.summary()
-    if extra:
-        payload.update(extra)
-    path = out_dir / f"{report.dataset}-{report.method}.json"
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return path
+def config_from(args):
+    return MethodConfig(args.method or "embedding", args.components, args.whiten, args.dtype,
+                        getattr(args, "threshold", None))
 
 
-def _featurizer_for(method: str, embedder: FaceEmbedder | None):
-    """Retorna callable Record -> feature vector conforme o método."""
-    manifest_cache: dict[str, dict[str, np.ndarray]] = {}
-
-    if method in ("pixels", "pca"):
-        return lambda rec: load_pixels(ROOT / rec.path)
-
-    if method in ("embedding", "embedding-centroid"):
-        assert embedder is not None
-        cache_dir = ROOT / "artifacts" / "embeddings"
-
-        def embed_fn(rec):
-            ds = rec.dataset
-            key = f"{ds}-{embedder.model_name}"
-            if key not in manifest_cache:
-                cache_path = cache_dir / f"{ds}-{embedder.model_name}.pt"
-                if cache_path.exists():
-                    cache = EmbeddingCache.load(cache_path)
-                    if cache.model_name == embedder.model_name:
-                        manifest_cache[key] = {
-                            p: emb for p, emb in zip(cache.paths, cache.embeddings)
-                        }
-                    else:
-                        manifest_cache[key] = {}
-                else:
-                    manifest_cache[key] = {}
-
-            table = manifest_cache[key]
-            if rec.path not in table:
-                # Computa e atualiza cache incrementalmente.
-                return embedder.embed_files([rec.path], ROOT)[0]
-            return table[rec.path]
-
-        return embed_fn
-
-    raise ValueError(f"Método desconhecido: {method!r}")
+def feature_store(args, manifest, embeddings):
+    return FeatureStore(args.root, manifest, "embedding" if embeddings else "pixels",
+                        args.device, args.batch_size)
 
 
-def cmd_audit(args: argparse.Namespace) -> int:
-    manifest = build_manifest(args.dataset, ROOT)
-    out = ROOT / "artifacts" / "manifests" / f"{args.dataset}.csv"
-    manifest.to_csv(out)
-    info = audit(manifest)
-    print(json.dumps(info, indent=2, ensure_ascii=False))
+def run_metadata(args, manifest):
+    return dict(schema=2, command=args.command, dataset=manifest.dataset,
+                manifest_fingerprint=manifest.fingerprint, protocol=PROTOCOL_VERSION,
+                environment=environment(args.root), threads=args.threads,
+                splits=[split.summary() for split in make_splits(manifest)])
 
-    dups = find_duplicates(manifest)
-    if dups:
-        print(f"\nDuplicatas internas ({len(dups)} grupos):")
-        for h, paths in sorted(dups.items())[:10]:
-            print("  " + " <-> ".join(paths))
 
-    # Verifica subconjuntos conhecidos entre níveis.
-    other = "easy" if args.dataset == "very-easy" else "very-easy"
-    other_dir = ROOT / other
-    if other_dir.is_dir():
-        other_manifest = build_manifest(other, ROOT)
-        pairs = check_subset(manifest, other_manifest)
-        print(f"\nSubconjunto de '{other}': {len(pairs)}/{len(manifest.records)} imagens")
+def print_report(report):
+    print(f"{report['dataset']} / {report['method']} / {report['partition']}: "
+          f"{report['hits']}/{report['n_queries']} = {report['accuracy_mean']:.2%}")
+    for condition, values in report["per_condition"].items():
+        print(f"  {condition}: {values['hits']}/{values['n_queries']} = {values['accuracy']:.2%}")
 
-    print(f"\nManifesto salvo em: {out}")
+
+def cmd_audit(args):
+    import json
+
+    manifest = build_manifest(args.dataset, args.root)
+    result = audit(manifest)
+    result["protocol"] = PROTOCOL_VERSION
+    result["splits"] = [split.summary() for split in make_splits(manifest)]
+    other = {"very-easy": "easy", "easy": "very-easy", "medium": "hard"}[args.dataset]
+    if (args.root / other).is_dir():
+        result["overlap"] = {"dataset": other, "byte_identical_images": len(check_subset(manifest, build_manifest(other, args.root)))}
+    path = args.root / "artifacts" / "manifests" / f"{args.dataset}.csv"
+    manifest.to_csv(path)
+    write_json(path.with_suffix(".json"), result)
+    print(json.dumps({key: value for key, value in result.items() if key != "splits"}, indent=2, ensure_ascii=False))
+    print(f"Manifesto e auditoria: {path}")
     return 0
 
 
-def cmd_evaluate(args: argparse.Namespace) -> int:
-    manifest = build_manifest(args.dataset, ROOT)
-    set_active_method(args.method)
-
-    embedder = None
-    if args.method.startswith("embedding"):
-        embedder = FaceEmbedder()
-
-    evaluate = (
-        evaluate_very_easy if args.dataset == "very-easy" else evaluate_easy
-    )
-    featurizer = _featurizer_for(args.method, embedder)
-
-    # Passada fechada (sem limiar); com --reject, calibra e reavalia open-set.
-    folds = evaluate(manifest, featurizer)
-    extra: dict = {}
+def cmd_evaluate(args):
+    manifest = build_manifest(args.dataset, args.root)
+    config = config_from(args)
+    if args.reject and (not config.uses_embeddings or args.dataset != "medium" or args.partition != "test"):
+        raise ValueError("--reject requer embeddings, medium e --partition test (calibração na validação)")
+    if args.reject and args.threshold is not None:
+        raise ValueError("Use --reject ou --threshold, não ambos")
+    store = feature_store(args, manifest, config.uses_embeddings)
+    metadata = run_metadata(args, manifest)
     if args.reject:
-        threshold = calibrate_threshold_from_folds(folds, quantile=args.quantile)
-        folds = evaluate(manifest, featurizer, threshold=threshold)
-        extra["rejection"] = {
-            "threshold": round(threshold, 4),
-            "quantile": args.quantile,
-            "rejected": sum(
-                1 for f in folds for p in f.predictions if p.label == UNKNOWN_LABEL
-            ),
-            "n_queries": sum(len(f.predictions) for f in folds),
-        }
-
-    report = EvalReport(dataset=args.dataset, method=args.method, folds=folds)
-    path = _save_report(report, extra)
-    print(json.dumps(report.summary(), indent=2, ensure_ascii=False))
-    if extra:
-        print(f"\nRejeição open-set: {json.dumps(extra['rejection'], ensure_ascii=False)}")
-    print(f"\nRelatório salvo em: {path}")
+        validation = evaluate(manifest, store, config, "validation")
+        threshold = calibrate_threshold_from_folds(validation.folds, args.quantile)
+        config = replace(config, threshold=threshold)
+        metadata["rejection"] = dict(threshold=threshold, quantile=args.quantile,
+                                     calibration_partition="validation",
+                                     note="Somente conhecidos: não mede aceitação de desconhecidos.",
+                                     validation=validation.summary())
+    report = evaluate(manifest, store, config, args.partition)
+    metadata.update(report=report.summary(), feature_extraction=store.summary())
+    directory = new_run(args.root, args.dataset, f"evaluate-{args.partition}-{config.slug}")
+    write_json(directory / "report.json", metadata)
+    print_report(report.summary())
+    print(f"Relatório: {directory / 'report.json'}")
     return 0
 
 
-def cmd_compare(args: argparse.Namespace) -> int:
-    """Avalia embedding (nn) vs embedding-centroid no mesmo protocolo."""
-    manifest = build_manifest(args.dataset, ROOT)
-    embedder = FaceEmbedder()
-    evaluate = (
-        evaluate_very_easy if args.dataset == "very-easy" else evaluate_easy
-    )
-    featurizer = _featurizer_for("embedding", embedder)
-
-    comparison: dict = {"dataset": args.dataset, "methods": {}}
-    for method in ("embedding", "embedding-centroid"):
-        set_active_method(method)
-        folds = evaluate(manifest, featurizer)
-        report = EvalReport(dataset=args.dataset, method=method, folds=folds)
-        _save_report(report)
-        per_cond = {
-            f.condition: round(f.accuracy, 4)
-            for f in folds
-        }
-        comparison["methods"][method] = {
-            "accuracy_mean": round(report.accuracy, 4),
-            "cmc_mean": {str(k): round(v, 4) for k, v in report.cmc.items()},
-            "per_condition": per_cond,
-        }
-
-    out_dir = ROOT / "artifacts" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{args.dataset}-compare.json"
-    path.write_text(json.dumps(comparison, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps(comparison, indent=2, ensure_ascii=False))
-    print(f"\nComparação salva em: {path}")
+def cmd_experiment(args):
+    if args.plots:
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError as error:
+            raise ValueError('Gráficos requerem: pip install -e ".[plots]"') from error
+    manifest = build_manifest(args.dataset, args.root)
+    stores = {}
+    for method in args.methods:
+        space = "embedding" if method.startswith("embedding") else "pixels"
+        if space not in stores:
+            stores[space] = feature_store(args, manifest, space == "embedding")
+    experiment = run_experiment(manifest, stores, args.components, args.methods, args.whiten, args.dtype)
+    metadata = run_metadata(args, manifest)
+    metadata["experiment"] = experiment
+    directory = new_run(args.root, args.dataset, "experiment")
+    write_json(directory / "report.json", metadata)
+    export_experiment(experiment, directory, args.plots)
+    if experiment["selections"]:
+        for chosen in experiment["selections"]:
+            print(f"Validação: {chosen['method']}, k={chosen['config']['n_components']}, "
+                  f"acurácia={chosen['validation_accuracy']:.2%}")
+    for report in experiment["final_test"] or experiment["candidates"]:
+        if report["config"]["n_components"]:
+            print(f"k={report['config']['n_components']}")
+        print_report(report)
+    for skipped in experiment["skipped"]:
+        print(f"Configuração ignorada: {skipped['reason']}")
+    print(f"JSON, CSV e gráficos solicitados: {directory}")
     return 0
 
 
-def cmd_identify(args: argparse.Namespace) -> int:
-    gallery_manifest = build_manifest(args.gallery, ROOT)
-    embedder = FaceEmbedder()
+def create_gallery(args, dataset):
+    manifest = build_manifest(dataset, args.root)
+    split = make_splits(manifest)[0]
+    config = config_from(args)
+    store = feature_store(args, manifest, config.uses_embeddings)
+    model = fit_split(split, store, config)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = getattr(args, "output", None) or args.root / "artifacts" / "galleries" / dataset / f"{stamp}-{config.slug}.npz"
+    model.save(path, dataset, {r.identity_index: r.identity_original for r in split.gallery}, split.gallery)
+    print(f"Galeria salva: {path}")
+    return RecognitionModel.load(path)
 
-    # Galeria: foto 1 de cada identidade (ou clean de 'a' no easy).
-    by_identity: dict[str, list] = {}
-    for rec in gallery_manifest.records:
-        by_identity.setdefault(rec.identity_original, []).append(rec)
-    gallery_recs = []
-    for ident, recs in sorted(by_identity.items()):
-        clean_a = [r for r in recs if r.source_photo == "a" and r.condition == "clean"]
-        pick = clean_a[0] if clean_a else sorted(recs, key=lambda r: r.photo_id)[0]
-        gallery_recs.append(pick)
 
-    embedder_cache = EmbeddingCache.build(
-        dataset=args.gallery,
-        model_name=embedder.model_name,
-        paths=[r.path for r in gallery_recs],
-        labels=[r.identity_index for r in gallery_recs],
-        embeddings=embedder.embed_files([r.path for r in gallery_recs], ROOT),
-    )
-    cache_dir = ROOT / "artifacts" / "models"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{args.gallery}-gallery.pt"
-    embedder_cache.save(cache_path)
-
-    clf = EmbeddingClassifier(mode="nn", threshold=args.threshold).fit(
-        embedder_cache.embeddings,
-        np.array([r.identity_index for r in gallery_recs]),
-    )
-
-    query_emb = embedder.embed_image(args.image, detect=args.detect)[None, :]
-    (pred,) = clf.predict(query_emb)
-    ident_map = {r.identity_index: r.identity_original for r in gallery_recs}
-
-    if pred.label == UNKNOWN_LABEL:
-        print("Identidade: desconhecida (abaixo do limiar)")
-        print(f"Similaridade: {pred.similarity:.4f} < limiar {args.threshold:.4f}")
-        print(f"Melhor candidato da galeria: {ident_map.get(pred.ranking[0], '?') if pred.ranking else '?'}")
-        return 0
-
-    print(f"Identidade: {ident_map[pred.label]}")
-    print(f"Similaridade: {pred.similarity:.4f}")
-    print(f"Segundo colocado: {ident_map.get(pred.runner_up, '?')}")
-    print(f"Margem: {pred.similarity - pred.runner_up_similarity:.4f}")
+def cmd_enroll(args):
+    create_gallery(args, args.dataset)
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def cmd_identify(args):
+    if args.model:
+        if args.method or args.components is not None or args.whiten:
+            raise ValueError("--model já contém método, componentes e whitening")
+        model = RecognitionModel.load(args.model)
+        if args.threshold is not None:
+            model.config = replace(model.config, threshold=args.threshold)
+            model.classifier.threshold = args.threshold
+    else:
+        model = create_gallery(args, args.gallery)
+    if args.detect and not model.config.uses_embeddings:
+        raise ValueError("--detect requer método embedding")
+    if model.config.uses_embeddings:
+        from .embeddings import FaceEmbedder
+
+        features = FaceEmbedder(device=args.device, batch_size=args.batch_size).embed_image(args.image, args.detect)
+    else:
+        features = load_pixels(args.image)
+    prediction = model.predict(features[None, :])[0]
+    identities = model.metadata["identity_map"]
+    print(f"Identidade: {identities.get(str(prediction.label), 'desconhecida')}")
+    print(f"Score: {prediction.similarity:.6f}")
+    print(f"Melhor candidato: {identities[str(prediction.ranking[0])]}")
+    print(f"Segundo colocado: {identities[str(prediction.runner_up)]}")
+    print(f"Margem: {prediction.similarity - prediction.runner_up_similarity:.6f}")
+    return 0
+
+
+def _method_args(parser, default="embedding"):
+    parser.add_argument("--method", choices=METHODS, default=default)
+    parser.add_argument("--components", type=int, help="k; omitido = posto numérico completo")
+    parser.add_argument("--whiten", action="store_true")
+    parser.add_argument("--dtype", choices=["float32", "float64"], default="float64")
+    parser.add_argument("--threshold", type=float, help="limiar manual de cosseno [-1, 1]")
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(prog="recdev", description=__doc__)
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", type=Path, default=ROOT, help="pasta que contém os datasets")
+    common.add_argument("--device", choices=["cpu", "cuda", "mps"], default=None)
+    common.add_argument("--batch-size", type=int, default=32)
+    common.add_argument("--threads", type=int, default=4, help="limite de threads BLAS/PyTorch")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_audit = sub.add_parser("audit", help="manifesto + auditoria do dataset")
-    p_audit.add_argument("--dataset", required=True, choices=["very-easy", "easy"])
-    p_audit.set_defaults(func=cmd_audit)
+    audit_parser = sub.add_parser("audit", parents=[common], help="manifesto, hashes e splits")
+    audit_parser.add_argument("--dataset", required=True, choices=DATASETS)
+    audit_parser.set_defaults(func=cmd_audit)
 
-    p_eval = sub.add_parser("evaluate", help="protocolo de avaliação")
-    p_eval.add_argument("--dataset", required=True, choices=["very-easy", "easy"])
-    p_eval.add_argument(
-        "--method",
-        default="embedding",
-        choices=["pixels", "pca", "embedding", "embedding-centroid"],
-    )
-    p_eval.add_argument(
-        "--reject",
-        action="store_true",
-        help="rejeição de desconhecidos: calibra limiar e reavalia open-set",
-    )
-    p_eval.add_argument(
-        "--quantile",
-        type=float,
-        default=0.05,
-        help="quantil para calibrar o limiar (default 0.05)",
-    )
-    p_eval.set_defaults(func=cmd_evaluate)
+    eval_parser = sub.add_parser("evaluate", parents=[common], help="avalia uma configuração fixa")
+    eval_parser.add_argument("--dataset", required=True, choices=DATASETS)
+    _method_args(eval_parser)
+    eval_parser.add_argument("--partition", choices=["validation", "test"], default="test")
+    eval_parser.add_argument("--reject", action="store_true", help="calibra somente na validação do medium")
+    eval_parser.add_argument("--quantile", type=float, default=0.05)
+    eval_parser.set_defaults(func=cmd_evaluate)
 
-    p_cmp = sub.add_parser(
-        "compare", help="compara embedding (nn) vs embedding-centroid"
-    )
-    p_cmp.add_argument("--dataset", required=True, choices=["very-easy", "easy"])
-    p_cmp.set_defaults(func=cmd_compare)
+    experiment_parser = sub.add_parser("experiment", aliases=["compare"], parents=[common], help="varredura de k + comparação")
+    experiment_parser.add_argument("--dataset", required=True, choices=DATASETS)
+    experiment_parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(DEFAULT_METHODS))
+    experiment_parser.add_argument("--components", nargs="+", type=int)
+    experiment_parser.add_argument("--whiten", action="store_true")
+    experiment_parser.add_argument("--dtype", choices=["float32", "float64"], default="float64")
+    experiment_parser.add_argument("--plots", action="store_true")
+    experiment_parser.set_defaults(func=cmd_experiment)
 
-    p_ident = sub.add_parser("identify", help="identifica uma imagem")
-    p_ident.add_argument("--gallery", required=True, choices=["very-easy", "easy"])
-    p_ident.add_argument("--image", required=True)
-    p_ident.add_argument(
-        "--threshold",
-        type=float,
-        default=None,
-        help="limiar de cosseno; abaixo dele a imagem é 'desconhecida'",
-    )
-    p_ident.add_argument(
-        "--detect",
-        action="store_true",
-        help="detecta e alinha o rosto com MTCNN (para fotos arbitrárias)",
-    )
-    p_ident.set_defaults(func=cmd_identify)
+    enroll_parser = sub.add_parser("enroll", parents=[common], help="salva a galeria do primeiro split")
+    enroll_parser.add_argument("--dataset", required=True, choices=DATASETS)
+    enroll_parser.add_argument("--output", type=Path)
+    _method_args(enroll_parser)
+    enroll_parser.set_defaults(func=cmd_enroll)
+
+    identify_parser = sub.add_parser("identify", parents=[common], help="identifica usando galeria persistida")
+    gallery = identify_parser.add_mutually_exclusive_group(required=True)
+    gallery.add_argument("--model", type=Path, help="galeria .npz produzida por enroll")
+    gallery.add_argument("--gallery", choices=DATASETS, help="cria e salva galeria antes de identificar")
+    identify_parser.add_argument("--image", required=True, type=Path)
+    identify_parser.add_argument("--detect", action="store_true", help="MTCNN: detecta e recorta o maior rosto")
+    _method_args(identify_parser, default=None)
+    identify_parser.set_defaults(func=cmd_identify)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    if args.threads < 1 or args.batch_size < 1:
+        parser.error("--threads e --batch-size devem ser positivos")
+    args.root = args.root.resolve()
+    if not args.root.is_dir():
+        parser.error(f"Pasta raiz inexistente: {args.root}")
+    try:
+        from threadpoolctl import threadpool_limits
+
+        # Evita sobresubscrição de BLAS em matrizes pequenas e inferência CPU.
+        if args.command not in ("audit",):
+            import torch
+
+            torch.set_num_threads(args.threads)
+        with threadpool_limits(limits=args.threads):
+            return args.func(args)
+    except (ValueError, FileNotFoundError) as error:
+        parser.error(str(error))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

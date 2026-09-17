@@ -52,3 +52,9 @@ def test_auto_device_is_valid():
     assert device in ("cuda", "mps", "cpu")
     if device == "cuda":
         assert torch.cuda.is_available()
+
+
+def test_fingerprint_rejects_changed_dtype():
+    cache = _cache()
+    cache.embeddings = cache.embeddings.astype(np.float64)
+    assert not cache.verify()

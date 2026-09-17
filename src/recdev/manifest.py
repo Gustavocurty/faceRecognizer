@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import re
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -28,8 +29,8 @@ class Record:
     identity_original: str
     identity_index: int
     photo_id: int
-    source_photo: str  # "a" ou "b" (fotografia-base FEI)
-    condition: str  # clean | dark | noise | noise-dark
+    source_photo: str  # a/b (alinhadas), ou código FEI 01..14 (originais)
+    condition: str  # condição explícita ou código fei-XX (medium)
     sha256: str
     split_group: str  # agrupa variantes da mesma foto-base
     fei_name: str = ""  # nome original no dataset FEI
@@ -40,10 +41,17 @@ class Manifest:
     dataset: str
     records: list[Record] = field(default_factory=list)
 
+    @property
+    def fingerprint(self) -> str:
+        payload = {"dataset": self.dataset, "records": [asdict(r) for r in self.records]}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
     def to_csv(self, path: Path) -> None:
+        if not self.records:
+            raise ValueError("Manifesto vazio")
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(asdict(self.records[0]).keys()))
+            writer = csv.DictWriter(f, fieldnames=list(asdict(self.records[0]).keys()), lineterminator="\n")
             writer.writeheader()
             for rec in self.records:
                 writer.writerow(asdict(rec))
@@ -74,6 +82,11 @@ class Manifest:
 def parse_fei_name(fei_name: str) -> tuple[str, str]:
     """Extrai (foto-base, condição) de um nome FEI como ``11a-noise-dark.jpg``."""
     stem = Path(fei_name).stem
+    numeric = re.fullmatch(r"\d+-(0[1-9]|1[0-4])", stem)
+    if numeric:
+        source = numeric.group(1)
+        # Preserva o código original: não inventa rótulos de pose/iluminação.
+        return source, f"fei-{source}"
     parts = stem.split("-")
     source_photo = parts[0][-1].lower()
     if source_photo not in ("a", "b"):
@@ -94,6 +107,8 @@ def load_mapping(dataset_dir: Path) -> dict[str, str]:
             if not line:
                 continue
             fei_name, local_name = line.split()
+            if local_name in mapping:
+                raise ValueError(f"Mapeamento duplicado: {local_name}")
             mapping[local_name] = fei_name
     return mapping
 
@@ -136,13 +151,17 @@ def build_manifest(dataset: str, root: Path) -> Manifest:
         fei_name = mapping.get(path.name, "")
         if fei_name:
             source_photo, condition = parse_fei_name(fei_name)
+        elif dataset in ("very-easy", "easy", "medium"):
+            raise ValueError(f"Imagem sem mapeamento FEI: {path.name}")
         else:
             source_photo, condition = "?", "unknown"
 
         digest = sha256_of(path)
+        # Política conservadora: frontal/expressão/iluminação 11..14 juntas.
+        group = "frontal-11-14" if dataset in ("medium", "hard") and source_photo in ("11", "12", "13", "14") else source_photo
         records.append(
             Record(
-                path=str(path.relative_to(root)),
+                path=path.relative_to(root).as_posix(),
                 dataset=dataset,
                 identity_original=identity_original,
                 identity_index=identity_index,
@@ -151,7 +170,7 @@ def build_manifest(dataset: str, root: Path) -> Manifest:
                 condition=condition,
                 sha256=digest,
                 # Agrupa todas as variantes (dark/noise/...) da mesma foto-base.
-                split_group=f"{identity_original}-{source_photo}" if source_photo != "?" else f"{identity_original}-?",
+                split_group=f"{identity_original}-{group}",
                 fei_name=fei_name,
             )
         )
@@ -198,5 +217,6 @@ def audit(manifest: Manifest) -> dict:
         "images_per_identity": per_identity,
         "images_per_condition": per_condition,
         "n_split_groups": len(groups),
+        "fingerprint": manifest.fingerprint,
         "duplicates_within": sum(len(v) - 1 for v in find_duplicates(manifest).values()),
     }

@@ -1,161 +1,260 @@
-RECDEV - FACE RECOGNIZER + DATASETS
+RECDEV 0.2 — RECONHECIMENTO FACIAL COM DEEP LEARNING E PCA/SVD
+==========================================================
 
-  Reconhecedor facial (identificação fechada) com deep learning, construído
-  sobre uma coleção de datasets de complexidade crescente.
+Software do trabalho de Álgebra Linear Numérica: identifica pessoas de uma
+galeria usando pixels ou embeddings de uma rede pré-treinada, com redução
+opcional de dimensionalidade por PCA calculado explicitamente via SVD.
 
-  Esta primeira versão cobre os datasets very-easy e easy. Os datasets
-  originais desta coleção (criada por Ricardo Fabbri - IPRJ/UERJ) permanecem
-  inalterados nas pastas very-easy/, easy/, medium/, hard/ e extras/.
+Pergunta experimental:
+  Quanto podemos reduzir os embeddings faciais preservando a identificação?
 
+A InceptionResnetV1/VGGFace2 permanece congelada. Não há treinamento do zero
+nem fine-tuning dos pesos. O PCA é ajustado exclusivamente na galeria.
 
-DESCRITION / DATASETS
+GUIA RÁPIDO
+-----------
 
-  Images are all 100x100, in 4 levels of complexity: very easy, easy, medium
-  and hard. See the README files inside the respective folders for details.
+Python 3.10 a 3.12. Na raiz do projeto:
 
-  very-easy: 5 pessoas x 2 fotos limpas (10 imagens)
-  easy:      as mesmas 5 pessoas x 8 fotos (40 imagens): cada foto-base (a/b)
-             em 4 condições fotométricas: clean, dark, noise, noise-dark
+  python -m pip install -e ".[dev,plots]"
+  python -m recdev audit --dataset medium
+  python -m recdev experiment --dataset medium --plots
+  python -m pytest tests/ -q
 
-  Sources: modified subset of the FEI face image dataset part 1, plus cropped
-  regions detected by Facebook on arbitrary photos (extras/).
+O comando instalado "recdev" também pode substituir "python -m recdev".
+Na primeira extração, facenet-pytorch baixa os pesos VGGFace2 se eles ainda
+não estiverem no cache padrão do PyTorch. Depois, os embeddings do projeto
+são armazenados em artifacts/cache/embeddings/.
 
-  File names follow  <person-id>-<photo-id>.{jpg,png}
-  (eg. 17-3.jpg = photo 3 of person 17). mapping-to-fei-names preserves the
-  original database filenames.
+Instalação mínima, sem testes/gráficos: python -m pip install -e .
+As faixas de torch, torchvision, NumPy e Pillow respeitam facenet-pytorch 2.6.
 
+MÉTODOS
+-------
 
-IMPLEMENTAÇÃO
+  pixels              RGB 100x100 (30.000 atributos), vizinho próximo L2
+  pca                 pixels -> PCA/SVD -> vizinho próximo L2
+  embedding           rede -> 512 atributos -> cosseno
+  embedding-pca       rede -> PCA/SVD -> normalização L2 -> cosseno
+  embedding-centroid  rede -> centroide normalizado por pessoa -> cosseno
 
-  Stack: Python 3.10+, PyTorch (CPU), scikit-learn, Pillow, facenet-pytorch.
+PCA: média da galeria, SVD econômica Xc = U S Vt, projeção Xc V_k.
+O código não forma a matriz de covariância 30.000 x 30.000 dos pixels.
+Whitening é opcional; o padrão é desligado. A fatoração é do NumPy/LAPACK;
+centralização, posto, seleção, projeção e reconstrução são implementados no
+projeto. Testes comparam o resultado com o PCA do scikit-learn.
 
-  Arquitetura (src/recdev/):
+--components K escolhe k explicitamente. Sem esse argumento, PCA usa todo
+o posto numérico disponível. Um k acima do posto gera erro em evaluate/enroll;
+na varredura experiment, a configuração inválida é registrada como skipped.
 
-    manifest.py        manifesto + auditoria: rótulos pelo prefixo do nome,
-                       linhagem foto-base (a/b), condição fotométrica, SHA-256
-    preprocessing.py   RGB, resize 160x160, normalização do facenet
-    classifier.py      PixelBaseline (L2), PCABaseline (PCA+whiten),
-                       EmbeddingClassifier (cosseno, nn/centroid, limiar
-                       open-set), calibração de limiar
-    embeddings.py      InceptionResnetV1 pré-treinada VGGFace2 (congelada),
-                       dispositivo auto-detectado, MTCNN opcional
-    evaluation.py      protocolos de avaliação sem vazamento, CMC,
-                       matriz de confusão, margem, calibração de limiar
-    cli.py             CLI: audit / evaluate / compare / identify
+Posto após centralização <= min(n_amostras - 1, n_atributos). A tolerância
+também considera dimensão, maior valor singular e precisão float32/float64.
+Nas galerias de cinco imagens de very-easy/easy, há no máximo 4 componentes.
 
-  Abordagem: embeddings faciais pré-treinados + similaridade de cosseno.
-  Nenhum treinamento do zero (datasets pequenos demais); o backbone fica
-  congelado e a identificação é por nearest-neighbor ou centroide, com
-  opção de rejeição de desconhecidos (open-set) por limiar de cosseno.
+DATASETS E PROTOCOLO source-group-v1
+----------------------------------
 
+  very-easy:   5 pessoas,  10 imagens, 2 fotografias-base por pessoa
+  easy:        5 pessoas,  40 imagens, as mesmas 10 fotografias-base
+  medium:     50 pessoas, 350 imagens, 7 códigos FEI por pessoa
 
-PROTOCOLO DE AVALIAÇÃO (SEM VAZAMENTO)
+very-easy:
+  Dois sentidos: foto-base a na galeria e b no teste; depois o inverso.
 
-  As imagens de easy derivam de apenas 10 fotografias-base (variantes
-  dark/noise não são amostras independentes). Um split aleatório por arquivo
-  causaria vazamento (ex.: foto limpa no treino, cópia escura no teste).
+easy:
+  Galeria = clean de a; teste = clean/dark/noise/noise-dark de b, e inverso.
+  São 2 splits com 4 condições cada. Variantes da mesma foto-base nunca
+  atravessam galeria/teste. Não há validação independente nessas duas bases.
+  As curvas de k são descritivas: experiment não seleciona um vencedor nelas.
 
-  very-easy: avaliação bidirecional — fold A: foto 1 na galeria / foto 2 no
-  teste; fold B: o inverso. Média dos dois folds.
+medium:
+  Usa os códigos ORIGINAIS do mapping-to-fei-names:
+    galeria:   FEI 04 e 06 -> 100 imagens (2 por pessoa)
+    validação: FEI 05      ->  50 imagens (1 por pessoa)
+    teste:     FEI 11..14  -> 200 imagens (4 por pessoa)
+  Os códigos 11..14 ficam no mesmo grupo frontal conservador por identidade.
+  Isso é uma política de separação, não uma afirmação de que sejam cópias
+  sintéticas. As condições são reportadas como fei-11, fei-12 etc., sem
+  inventar anotações de pose/exposição ausentes no mapeamento original.
+  Há mudança de condição entre validação e teste; ver docs/metodologia.md.
 
-  easy: folds por fotografia-base — galeria = versões clean de 'a', probes =
-  todas as condições de 'b' (e vice-verso). Variantes da mesma foto-base
-  nunca cruzam galeria/teste. Relatório por condição.
+Na execução experiment do medium:
+  1. Compara a grade de k SOMENTE na validação.
+  2. Seleciona por acurácia; empates favorecem o menor k.
+  3. Avalia no teste somente as configurações escolhidas e baselines fixos.
+  A galeria/PCA não são reajustados com a validação após a escolha.
 
-  very-easy é subconjunto byte-a-byte de easy (verificado por SHA-256), e
-  medium é subconjunto de hard: os níveis nunca devem ser misturados em um
-  mesmo split.
+Cada split verifica caminhos, hashes e grupos disjuntos entre partições,
+além da presença das mesmas identidades. Os níveis são avaliados separados:
+very-easy está contido byte a byte em easy; medium está contido em hard.
+Os datasets originais permanecem nas pastas de origem.
 
+COMANDOS
+--------
 
-RESULTADOS (artifacts/reports/)
+Auditoria (CSV e JSON com hashes, fontes e splits):
 
-  very-easy (média dos 2 folds):  pixels 100% | pca 100% | embedding 100%
+  python -m recdev audit --dataset very-easy
+  python -m recdev audit --dataset easy
+  python -m recdev audit --dataset medium
 
-  easy (galeria clean, probes por condição):
+Avaliação de uma configuração fixa:
 
-    método      clean  dark  noise  noise-dark  média
-    pixels      100%    50%    30%      80%       65%
-    pca         100%    30%    20%      30%       45%
-    embedding   100%   100%   100%     100%      100%
+  python -m recdev evaluate --dataset easy --method pixels
+  python -m recdev evaluate --dataset easy --method pca --components 4
+  python -m recdev evaluate --dataset easy --method pca --components 4 --whiten
+  python -m recdev evaluate --dataset medium --method embedding
+  python -m recdev evaluate --dataset medium --method embedding-pca --components 8
+  python -m recdev evaluate --dataset medium --method embedding-pca --components 16 --partition validation
 
-  O embedding pré-treinado é robusto às degradações fotométricas; os
-  baselines degradam conforme o esperado, validando o protocolo.
+Experimentos (JSON + CSV; gráficos opcionais):
 
+  python -m recdev experiment --dataset very-easy --plots
+  python -m recdev experiment --dataset easy --plots
+  python -m recdev experiment --dataset medium --plots
+  python -m recdev experiment --dataset medium --components 8 16 32 64 --dtype float32 --plots
+  python -m recdev compare --dataset medium --methods embedding embedding-centroid
 
-USO
+"compare" é um alias de "experiment". A grade padrão é 1/2/3/4 nas bases
+pequenas e 8/16/32/64 em medium. Para executar apenas os baselines locais:
 
-  Instalação:
+  python -m recdev experiment --dataset medium --methods pixels pca
 
-    pip install -e .
-    pip install pytest   # opcional, para os testes
+Galeria persistente (usa a galeria do primeiro split, sem validação/teste):
 
-  Auditoria e manifesto (artifacts/manifests/*.csv):
+  python -m recdev enroll --dataset medium --method embedding-pca --components 8 --output artifacts/galleries/medium/embedding-pca-k8.npz
+  python -m recdev identify --model artifacts/galleries/medium/embedding-pca-k8.npz --image medium/1-4.jpg
 
-    python3 -m recdev audit --dataset very-easy
-    python3 -m recdev audit --dataset easy
+O NPZ guarda rótulos, galeria projetada, média, componentes, escalas e
+configuração. É carregado sem pickle e validado por fingerprint. A consulta
+usa exatamente a projeção salva; não reajusta o PCA. O arquivo acima pode
+ser recriado pelo comando enroll e é ignorado pelo Git.
 
-  Avaliação com relatório JSON (artifacts/reports/*.json). O relatório inclui
-  acurácia, CMC (rank-1/rank-5), margem média e matriz de confusão por fold:
+Atalho que cria/salva uma galeria e identifica uma consulta:
 
-    python3 -m recdev evaluate --dataset very-easy --method embedding
-    python3 -m recdev evaluate --dataset easy --method pixels
-    # métodos: pixels | pca | embedding | embedding-centroid
+  python -m recdev identify --gallery easy --image easy/11-7.jpg
 
-  Rejeição de desconhecidos (open-set): calibra um limiar de cosseno a
-  partir do quantil inferior das similaridades de acertos (default 5%) e
-  reavalia com rejeição:
+Rejeição opcional (fora do experimento principal):
 
-    python3 -m recdev evaluate --dataset easy --method embedding --reject
-    # --quantile ajusta o quantil do limiar (default 0.05)
+  python -m recdev evaluate --dataset medium --method embedding --reject
+  python -m recdev identify --model artifacts/galleries/medium/embedding-pca-k8.npz --image foto.jpg --threshold 0.7
 
-  Comparação lado a lado nn vs centroid (artifacts/reports/*-compare.json):
+--reject calibra o quantil de scores corretos APENAS na validação de medium.
+Não é permitido calibrar no teste de easy/very-easy. Como só há pessoas
+conhecidas nesse protocolo, rejeição não mede aceitação de desconhecidos.
+Um limiar manual depende do método, k e pré-processamento; não é universal.
 
-    python3 -m recdev compare --dataset easy
+--detect no identify ativa detecção/recorte do maior rosto com MTCNN para
+consultas arbitrárias. Não altera a galeria; não promete alinhamento por
+landmarks. A avaliação das bases usa seus recortes originais.
 
-  Identificação de uma imagem (imprime identidade, similaridade,
-  segundo colocado e margem; salva a galeria em artifacts/models/):
+Opções comuns: --root CAMINHO, --device cpu/cuda/mps, --batch-size 32,
+--threads 4. A seleção de dispositivo automática prioriza CUDA, MPS, CPU.
+O limite de threads reduz sobresubscrição de BLAS/PyTorch em problemas pequenos.
+--dtype float32/float64 controla o núcleo matricial; a rede opera em float32.
 
-    python3 -m recdev identify --gallery easy --image caminho/para/foto.jpg
+RESULTADOS VERIFICADOS — 16/09/2026
+---------------------------------
 
-  Com limiar, consultas abaixo do cosseno informado são "desconhecidas":
+CPU, NumPy 1.26.4, PyTorch 2.2.2+cpu, facenet-pytorch 2.6.0,
+scikit-learn 1.9.0; núcleo matricial float64, sem whitening.
 
-    python3 -m recdev identify --gallery easy --image foto.jpg --threshold 0.7
+very-easy (10 consultas, curvas descritivas):
+  pixels e PCA sobre pixels (k=1..4): 100%
+  embeddings: 100%
+  embedding-pca: k=1 -> 40%; k=2/3/4 -> 100%
 
-  Com detecção facial (MTCNN), aceita fotos arbitrárias fora do padrão
-  100x100 (ex.: extras/); o rosto é detectado, alinhado e recortado antes
-  do embedding. Dispositivo é auto-detectado (CUDA > MPS > CPU):
+easy (40 consultas, curvas descritivas):
+  pixels: 65%
+  PCA sobre pixels: k=1 -> 42,5%; k=2 -> 75%; k=3 -> 60%; k=4 -> 65%
+  embeddings: 100%
+  embedding-pca: k=1 -> 32,5%; k=2 -> 92,5%; k=3/4 -> 100%
+  Estes números não selecionam automaticamente k no teste.
 
-    python3 -m recdev identify --gallery easy --image foto.jpg --detect
+medium (k escolhido na validação; 200 consultas de teste):
 
-  Testes:
+  método           k      validação       teste
+  pixels           -      47/50 = 94%      137/200 = 68,5%
+  pca             32      46/50 = 92%      135/200 = 67,5%
+  embedding      512      50/50 = 100%     185/200 = 92,5%
+  embedding-pca    8      50/50 = 100%     181/200 = 90,5%
 
-    python3 -m pytest tests/ -q
+Embeddings reduzidos de 512 para 8 valores: 64x menos valores por vetor,
+com perda de 2 pontos percentuais de acurácia nesse teste. Em float64,
+a galeria passa de 409.600 para 6.400 bytes. Incluindo média, base e escalas
+do PCA, são 43.328 bytes (aproximadamente 9,45x menos que a galeria original).
+Essa contagem não inclui rede, rótulos, metadados ou compressão do arquivo.
+A extração pela rede continua necessária; redução de dimensão não implica
+aceleração proporcional de todo o pipeline.
 
+Resultados completos e gráficos:
+  artifacts/runs/very-easy/20260916T231929899836Z-experiment/
+  artifacts/runs/easy/20260916T231930753301Z-experiment/
+  artifacts/runs/medium/20260916T231952689310Z-experiment/
 
-ESTRUTURA
+Interpretação:
+  - 100% em cinco pessoas não demonstra generalização ampla.
+  - As 40 imagens de easy não são 40 fotografias independentes.
+  - Rank-5 é trivial em cinco identidades; é informativo no medium.
+  - PCA maximiza variância, não separação entre identidades.
+  - Centralizar embeddings também altera a geometria do cosseno.
+  - Os tempos são medições de execução, não benchmarks estatísticos.
+  - As execuções pequenas registradas foram concorrentes; não usar seus
+    tempos para afirmar superioridade de desempenho.
 
-    src/recdev/         código do reconhecedor
-    tests/              35 testes (manifesto, splits, pré-processamento,
-                        classificadores, métricas, rejeição, cache)
-    artifacts/
-      manifests/        CSVs com linhagem completa de cada imagem
-      reports/          relatórios JSON de avaliação e comparação
-      models/           galerias de embeddings (identify)
-      embeddings/       cache de embeddings por dataset (fingerprint
-                        verificado contra alterações silenciosas)
+ORGANIZAÇÃO
+-----------
 
+  src/recdev/
+    config.py         configurações explícitas; métodos e datasets
+    manifest.py       linhagem, hashes, auditoria e fingerprint dos dados
+    protocols.py      splits e verificações de vazamento
+    preprocessing.py  pixels RGB e padronização oficial do facenet
+    embeddings.py     rede congelada, lotes/dispositivo e cache NPZ
+    features.py       carregamento/cache de features; reutilização de SVD
+    reduction.py      PCA por SVD, posto, whitening e reconstrução
+    classifier.py     scores L2/cosseno e ranking de identidades
+    pipeline.py       composição dos métodos e galerias persistentes
+    evaluation.py     avaliação, contagens, margens e diagnósticos
+    experiments.py    grade de k e seleção exclusivamente na validação
+    reporting.py      CSV e gráficos
+    artifacts.py      saídas por execução e versões do ambiente
+    cli.py            comandos
+  tests/              testes numéricos, de protocolos, cache, galerias e CLI
+  docs/metodologia.md formulação, decisões e limites experimentais
+  resumin.md          roteiro resumido para apresentação
+  artifacts/
+    manifests/        manifestos e auditorias
+    runs/             resultados novos, separados por execução/configuração
+    cache/            dados regeneráveis, ignorados pelo Git
+    galleries/        modelos regeneráveis, ignorados pelo Git
+    reports/, models/ histórico 0.1 preservado; não usado pelo pipeline novo
 
-PRÓXIMOS PASSOS
+Cada relatório novo contém configuração, versões, commit/estado do Git,
+fingerprint dos dados, composição dos splits, predições por imagem, tempos
+separados e espectro/variância/armazenamento quando há PCA. A SVD da galeria
+é reutilizada ao variar k; svd_reused sinaliza esse fato nos tempos de ajuste.
 
-  1. Incorporar medium (50 identidades) e hard (pose/expressão)
-  2. Fine-tuning parcial vs congelamento
-  3. Reavaliar limiar de rejeição com desconhecidos reais (fora da galeria)
-  4. Teste de mudança de domínio com extras/ (fotos naturais de Facebook)
+TESTES
+------
 
-  Notas: resultados refletem apenas estes dados controlados. IDs de datasets
-  diferentes não devem ser misturados (namespaced). Dados biométricos:
-  verificar licença/consentimento antes de uso externo.
+  python -m pytest tests/ -q
 
-AUTHOR
-  Original datasets curated by Ricardo Fabbri (rfabbri at gmail) - IPRJ/UERJ Nova Friburgo
-  Recognizer implementation: deep learning refactor (2026)
+A suíte não baixa pesos da rede: usa dados sintéticos para validar PCA contra
+scikit-learn, posto deficiente, whitening, precisão, ausência de reajuste em
+consultas, separação das partições, agregação das métricas, cache invalidado
+por conteúdo/pré-processamento, persistência e comandos de ponta a ponta.
+Os experimentos reais registrados acima verificam adicionalmente a rede.
+
+ORIGEM
+------
+
+Datasets organizados por Ricardo Fabbri (IPRJ/UERJ), a partir do FEI Face
+Database e de imagens adicionais em extras/. As pastas hard/ e extras/
+permanecem como dados originais, fora do protocolo de reconhecimento atual.
+
+FEI: https://fei.edu.br/~cet/facedatabase.html
+Referência: C. E. Thomaz e G. A. Giraldi, "A new ranking method for Principal
+Components Analysis and its application to face image analysis", Image and
+Vision Computing 28(6), 2010, pp. 902-913.

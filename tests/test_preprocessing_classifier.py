@@ -44,8 +44,8 @@ def test_tensor_shape_and_norm():
     t = load_rgb_pathless_tensor(img)
     assert t.shape == (3, 160, 160)
     assert t.dtype == np.float32
-    # Branco puro: (255/255 - 0.5)/0.5 = 1.0
-    assert np.allclose(t[:, :10, :10], 1.0)
+    # Padronização oficial do facenet: (255 - 127.5) / 128.
+    assert np.allclose(t[:, :10, :10], 127.5 / 128)
 
 
 def load_rgb_pathless_tensor(img):

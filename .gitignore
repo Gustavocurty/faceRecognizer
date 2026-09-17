@@ -22,3 +22,7 @@ htmlcov/
 # SO
 .DS_Store
 Thumbs.db
+
+# Artefatos binários regeneráveis; relatórios em runs/ permanecem versionáveis.
+artifacts/cache/
+artifacts/galleries/

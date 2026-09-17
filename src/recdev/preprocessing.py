@@ -14,29 +14,26 @@ from PIL import Image
 
 # Entrada esperada pela InceptionResnetV1 (facenet-pytorch).
 EMBED_SIZE = 160
-
-MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-
+PREPROCESSING_VERSION = "rgb-bilinear-160-facenet-fixed-v2"
 
 def load_rgb(path: Path) -> Image.Image:
     """Abre a imagem e garante modo RGB (converte RGBA/tons de cinza)."""
-    img = Image.open(path)
-    return img.convert("RGB")
+    with Image.open(path) as img:
+        return img.convert("RGB")
 
 
 def to_pixel_vector(img: Image.Image, size: tuple[int, int] = (100, 100)) -> np.ndarray:
     """Vetor de pixels float32 em [0, 1], para baselines (L2/PCA)."""
-    img = img.resize(size, Image.BILINEAR)
+    img = img.resize(size, Image.Resampling.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     return arr.reshape(-1)
 
 
 def to_tensor(img: Image.Image, size: int = EMBED_SIZE) -> np.ndarray:
     """Tensor CHW float32 com normalização usada pelo facenet-pytorch."""
-    img = img.resize((size, size), Image.BILINEAR)
-    arr = np.asarray(img, dtype=np.float32) / 255.0
-    arr = (arr - MEAN) / STD
+    img = img.resize((size, size), Image.Resampling.BILINEAR)
+    # fixed_image_standardization do facenet-pytorch.
+    arr = (np.asarray(img, dtype=np.float32) - 127.5) / 128.0
     return arr.transpose(2, 0, 1)  # HWC -> CHW
 
 

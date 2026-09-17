@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from recdev.evaluation import evaluate_easy, evaluate_very_easy, set_active_method
+from recdev.evaluation import evaluate_easy, evaluate_very_easy
 from recdev.manifest import Record, build_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +39,6 @@ def _record(ident: str, photo_id: int, source: str, condition: str) -> Record:
 
 def test_very_easy_folds_disjoint():
     manifest = build_manifest("very-easy", ROOT)
-    set_active_method("embedding")
     folds = evaluate_very_easy(manifest, ConstantFeaturizer())
     assert len(folds) == 2
     # Fold A: 5 consultas (uma por identidade). Fold B: idem.
@@ -50,7 +49,6 @@ def test_very_easy_folds_disjoint():
 
 def test_easy_folds_by_source_photo():
     manifest = build_manifest("easy", ROOT)
-    set_active_method("embedding")
     folds = evaluate_easy(manifest, ConstantFeaturizer())
     # 2 folds x 4 condições
     assert len(folds) == 8
@@ -63,7 +61,6 @@ def test_easy_folds_by_source_photo():
 
 def test_easy_perfect_featurizer_scores():
     manifest = build_manifest("easy", ROOT)
-    set_active_method("embedding")
 
     class PerfectFeaturizer(ConstantFeaturizer):
         def __call__(self, rec: Record) -> np.ndarray:
@@ -89,7 +86,6 @@ def test_no_split_group_crosses_gallery_and_probe():
 
 def test_deterministic_folds():
     manifest = build_manifest("very-easy", ROOT)
-    set_active_method("embedding")
     f1 = evaluate_very_easy(manifest, ConstantFeaturizer())
     f2 = evaluate_very_easy(manifest, ConstantFeaturizer())
     for a, b in zip(f1, f2):
