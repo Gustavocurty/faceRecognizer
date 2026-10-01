@@ -23,6 +23,5 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Artefatos binários regeneráveis; relatórios em runs/ permanecem versionáveis.
-artifacts/cache/
-artifacts/galleries/
+# Saídas regeneráveis da execução (cache de embeddings e JSON da grade).
+artifacts/
