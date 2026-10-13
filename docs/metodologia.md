@@ -69,6 +69,11 @@ A escolha maximiza a acurácia na validação e, em empate, prefere o menor k.
 A galeria não incorpora a validação. Os códigos 11–14 permanecem no mesmo
 grupo frontal por pessoa, para não espalhar vistas próximas entre partições.
 
+No hard o cadastro é o mesmo (04, 06 na galeria; 05 na validação). O teste
+usa as 11 poses restantes (01–03, 07–10 e 11–14): 550 consultas. Os nomes
+locais já são o código FEI (`1-04.jpg`), sem `mapping-to-fei-names`. A grade
+de k é 8/16/32/64, como no medium.
+
 As partições não compartilham caminhos e contêm as mesmas identidades.
 
 ## Referências

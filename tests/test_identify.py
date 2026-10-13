@@ -59,6 +59,13 @@ def test_detail_lists_known_misclassification():
     assert error["path"] == swapped_path
     assert error["true"] == "5"
     assert error["predicted"] == "1"
+    assert error["condition"] == "dark"
+    assert "condição dark" in error["reason"]
+    assert error["true_score"] is not None
+    analysis = detail["analysis"]
+    assert analysis["worst_group"]["name"] == "condição"
+    assert analysis["worst_group"]["value"] == "dark"
+    assert any(factor["factor"] == "k" for factor in analysis["factors"])
 
 
 def test_run_all_aggregates_errors():
@@ -72,3 +79,5 @@ def test_run_all_aggregates_errors():
     assert summary["overall"]["n_errors"] == 2
     assert {error["dataset"] for error in summary["errors"]} == {"easy", "very-easy"}
     assert summary["errors"][0]["path"] == swapped_path
+    assert "summary" in summary["analysis"]
+    assert summary["analysis"]["factors"]

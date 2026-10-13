@@ -8,7 +8,11 @@ from pathlib import Path
 
 IMG_SUFFIXES = {".jpg", ".jpeg", ".png"}
 CONDITIONS = ("clean", "dark", "noise", "noise-dark")
-DATASETS = ("very-easy", "easy", "medium")
+DATASETS = ("very-easy", "easy", "medium", "hard")
+HARD_CODES = ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14")
+HARD_GALLERY = ("04", "06")
+HARD_VALIDATION = ("05",)
+HARD_TEST = ("01", "02", "03", "07", "08", "09", "10", "11", "12", "13", "14")
 
 _NAME_RE = re.compile(r"^(?P<identity>\d+)-(?P<photo_id>\d+)\.(jpg|jpeg|png)$")
 
@@ -84,10 +88,13 @@ def load_records(dataset: str, root: Path) -> list[Record]:
         identity_original = match.group("identity")
         if identity_original not in identity_by_original:
             identity_by_original[identity_original] = len(identity_by_original)
-        fei_name = mapping.get(path.name, "")
-        if not fei_name:
-            raise ValueError(f"Imagem sem mapeamento FEI: {path.name}")
-        source_photo, condition = parse_fei_name(fei_name)
+        fei_name = mapping.get(path.name, path.name)
+        try:
+            source_photo, condition = parse_fei_name(fei_name)
+        except ValueError as error:
+            if path.name not in mapping:
+                raise ValueError(f"Imagem sem mapeamento FEI: {path.name}") from error
+            raise
         records.append(Record(
             path=path.relative_to(root).as_posix(),
             identity_original=identity_original,
@@ -122,6 +129,14 @@ def make_splits(records: list[Record], dataset: str) -> list[Split]:
             gallery=[r for r in records if r.source_photo in ("04", "06")],
             validation=[r for r in records if r.source_photo == "05"],
             test=[r for r in records if r.source_photo in ("11", "12", "13", "14")],
+        )]
+    elif dataset == "hard":
+        _check_sources(records, {(source, f"fei-{source}") for source in HARD_CODES})
+        splits = [Split(
+            name="hard-04-06-gallery-05-validation-remaining-test",
+            gallery=[r for r in records if r.source_photo in HARD_GALLERY],
+            validation=[r for r in records if r.source_photo in HARD_VALIDATION],
+            test=[r for r in records if r.source_photo in HARD_TEST],
         )]
     else:
         raise ValueError(f"Protocolo não implementado: {dataset}")

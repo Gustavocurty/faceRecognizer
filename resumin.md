@@ -27,6 +27,7 @@ Cinco amostras centralizadas têm posto máximo quatro. Um \(k\) acima do posto
 - `very-easy`: 5 pessoas, 10 imagens. Foto-base a na galeria e b no teste, e o inverso. Curva de k descritiva.
 - `easy`: 5 pessoas, 40 imagens. A versão limpa de uma foto-base contra as quatro condições da outra. Também descritiva.
 - `medium`: 50 pessoas, 350 imagens. Galeria FEI 04 e 06, validação 05, teste 11–14. Escolhe-se o k de maior acurácia na validação; empate fica com o menor k. O teste não participa da escolha.
+- `hard`: 50 pessoas, 700 imagens (14 poses). Mesma galeria/validação do medium; teste nas 11 poses restantes (550).
 
 ## Referência medida em 16/09/2026
 
@@ -47,9 +48,10 @@ python -m recdev --dataset medium --image medium/1-4.jpg --components 8
 python -m pytest tests/ -q
 ```
 
-`--all` avalia as três bases no protocolo atual, imprime acurácia e erros e
-grava `artifacts/runs/summary.json`. Cada JSON de base ganha um bloco
-`detail` no k representativo.
+`--all` avalia as quatro bases no protocolo atual, imprime acurácia, erros e
+a análise do que interferiu (k, margem de cosseno, condição/pose). Grava
+`artifacts/runs/summary.json`. Cada JSON de base ganha um bloco `detail`
+no k representativo, com `reason` por erro.
 
 A consulta de exemplo pertence ao teste (FEI 11), não à galeria (04/06).
 Na medição anterior ela foi identificada como a pessoa 1.

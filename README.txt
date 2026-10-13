@@ -45,6 +45,9 @@ BASES
               validação FEI 05 (50); teste FEI 11..14 (200).
               O k é o de maior acurácia na validação; empate fica com o
               menor k. O teste só entra depois dessa escolha.
+  hard:      50 pessoas, 700 imagens (14 poses FEI). Mesma galeria e
+              validação do medium; teste nas 11 poses restantes (550).
+              O nome local já é o código FEI; não há mapping.
 
 COMANDOS
 --------
@@ -54,11 +57,14 @@ COMANDOS
   python -m recdev --dataset easy --components 1 2 3 4
   python -m recdev --dataset medium --image medium/1-4.jpg --components 8
 
-A grade padrão é 1 2 3 4 nas bases pequenas e 8 16 32 64 no medium.
+A grade padrão é 1 2 3 4 nas bases pequenas e 8 16 32 64 no medium e no hard.
 A saída é uma tabela (k, acertos, variância retida, erro de reconstrução)
 e um JSON em artifacts/runs/{dataset}.json, agora com o bloco detail no
-k representativo (acurácia, por condição e lista de erros). --all percorre
-as três bases, imprime o panorama e grava artifacts/runs/summary.json.
+k representativo (acurácia, por condição, lista de erros e análise). A
+análise aponta o que interferiu: k (variância retida), margem entre o
+1º e o 2º cosseno, e condição/pose da consulta — para justificar acertos
+e erros. --all percorre as quatro bases, imprime o panorama e grava
+artifacts/runs/summary.json.
 --image usa a galeria do primeiro split, imprime a identidade e não grava
 modelo. No medium, se houver vários k, a consulta usa o k escolhido na
 validação. --all é incompatível com --dataset, --image e --components.
@@ -87,4 +93,5 @@ ORGANIZAÇÃO
   docs/metodologia.md     decisões numéricas
   resumin.md              roteiro curto
 
-As imagens ficam em very-easy/, easy/ e medium/, cada uma com mapping-to-fei-names.
+As imagens ficam em very-easy/, easy/, medium/ e hard/. As três primeiras
+têm mapping-to-fei-names; hard/ usa o próprio nome do arquivo (código FEI).

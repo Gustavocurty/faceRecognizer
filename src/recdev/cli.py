@@ -1,4 +1,4 @@
-"""Um comando: uma base, as três de uma vez, ou identificação de uma imagem."""
+"""Um comando: uma base, as quatro de uma vez, ou identificação de uma imagem."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def main(argv=None):
         prog="recdev",
         description="Identificação facial: rede pré-treinada, PCA por SVD e cosseno.",
     )
-    parser.add_argument("--all", action="store_true", help="avalia very-easy, easy e medium")
+    parser.add_argument("--all", action="store_true", help="avalia very-easy, easy, medium e hard")
     parser.add_argument("--dataset", choices=DATASETS)
     parser.add_argument("--root", type=Path, default=ROOT, help="pasta que contém as bases")
     parser.add_argument("--components", nargs="+", type=int, help="valores de k; omissão usa a grade da base")
@@ -124,6 +124,11 @@ def _print_table(result) -> None:
             f"Escolha na validação: k={selected['k']} ({selected['validation_accuracy']:.2%}); "
             f"teste: {selected['test_hits']}/{selected['test_queries']} = {selected['test_accuracy']:.2%}"
         )
+    analysis = result.get("detail", {}).get("analysis")
+    if analysis:
+        print(f"análise: {analysis['summary']}")
+        for factor in analysis["factors"]:
+            print(f"  - {factor['note']}")
 
 
 def _print_summary(summary) -> None:
@@ -139,15 +144,24 @@ def _print_summary(summary) -> None:
         f"{'geral':<10}  {overall['hits']:>4}/{overall['n_queries']:<4}  "
         f"{overall['accuracy']:>8.2%}"
     )
+    analysis = summary.get("analysis")
+    if analysis:
+        print(f"análise: {analysis['summary']}")
+        for factor in analysis["factors"]:
+            if factor["factor"] in ("dataset", "k", "margin", "pose", "condição", "confused_pair"):
+                prefix = f"{factor['dataset']}: " if factor.get("dataset") else ""
+                print(f"  - {prefix}{factor['note']}")
     errors = summary["errors"]
     print(f"erros ({len(errors)}):")
     if not errors:
         print("  nenhum")
         return
     for error in errors:
+        reason = error.get("reason", "")
+        extra = f"  [{reason}]" if reason else ""
         print(
             f"  {error['path']}  verdade={error['true']}  "
-            f"predito={error['predicted']}  score={error['score']:.4f}"
+            f"predito={error['predicted']}  score={error['score']:.4f}{extra}"
         )
 
 
