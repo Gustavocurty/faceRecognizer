@@ -147,11 +147,14 @@ def _evaluate(records, embeddings, fitted, k: int, partition: str, collect_cases
                 _, _, second, second_score = _rank_identities(row, gallery_labels)
                 true_score = _best_identity_score(row, gallery_labels, record.identity_index)
                 margin = None if second_score is None else score - second_score
+                matched = split.gallery[int(np.argsort(-row, kind="stable")[0])]
                 cases.append({
                     "path": record.path,
                     "split": split.name,
                     "true": record.identity_original,
                     "predicted": names[label],
+                    "matched_path": matched.path,
+                    "matched_source": matched.source_photo,
                     "score": score,
                     "second": None if second is None else names[second],
                     "second_score": second_score,
@@ -190,6 +193,8 @@ def _make_detail(row: dict) -> dict:
             "split": case["split"],
             "true": case["true"],
             "predicted": case["predicted"],
+            "matched_path": case["matched_path"],
+            "matched_source": case["matched_source"],
             "score": case["score"],
             "second": case["second"],
             "second_score": case["second_score"],
@@ -237,11 +242,14 @@ def _justify(case: dict) -> str:
     elif case["true_score"] is not None:
         gap = case["score"] - case["true_score"]
         parts.append(
-            f"cosseno {case['score']:.3f} em {case['predicted']}; "
-            f"verdadeira {case['true']} em {case['true_score']:.3f} (Δ={gap:.3f})"
+            f"confundiu com pessoa {case['predicted']} na foto {case['matched_path']} "
+            f"(cosseno {case['score']:.3f}); verdadeira {case['true']} em {case['true_score']:.3f} (Δ={gap:.3f})"
         )
     else:
-        parts.append(f"cosseno {case['score']:.3f} em {case['predicted']}")
+        parts.append(
+            f"confundiu com pessoa {case['predicted']} na foto {case['matched_path']} "
+            f"(cosseno {case['score']:.3f})"
+        )
     if case["condition"] in ("dark", "noise", "noise-dark"):
         parts.append(f"condição {case['condition']}")
     if case["source_photo"] in ("01", "02", "03", "07", "08", "09", "10"):

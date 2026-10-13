@@ -59,6 +59,7 @@ def test_detail_lists_known_misclassification():
     assert error["path"] == swapped_path
     assert error["true"] == "5"
     assert error["predicted"] == "1"
+    assert error["matched_path"] == "easy/1-1.jpg"
     assert error["condition"] == "dark"
     assert "condição dark" in error["reason"]
     assert error["true_score"] is not None

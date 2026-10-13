@@ -159,9 +159,12 @@ def _print_summary(summary) -> None:
     for error in errors:
         reason = error.get("reason", "")
         extra = f"  [{reason}]" if reason else ""
+        matched = error.get("matched_path", "")
+        match_bit = f"  foto={matched}" if matched else ""
         print(
             f"  {error['path']}  verdade={error['true']}  "
-            f"predito={error['predicted']}  score={error['score']:.4f}{extra}"
+            f"confundiu={error['predicted']}{match_bit}  "
+            f"score={error['score']:.4f}{extra}"
         )
 
 
