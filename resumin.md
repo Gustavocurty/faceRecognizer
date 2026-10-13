@@ -41,10 +41,15 @@ PCA maximiza variância, não a separação entre pessoas.
 
 ```powershell
 python -m pip install -e ".[dev]"
+python -m recdev --all
 python -m recdev --dataset medium
 python -m recdev --dataset medium --image medium/1-4.jpg --components 8
 python -m pytest tests/ -q
 ```
+
+`--all` avalia as três bases no protocolo atual, imprime acurácia e erros e
+grava `artifacts/runs/summary.json`. Cada JSON de base ganha um bloco
+`detail` no k representativo.
 
 A consulta de exemplo pertence ao teste (FEI 11), não à galeria (04/06).
 Na medição anterior ela foi identificada como a pessoa 1.

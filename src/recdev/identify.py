@@ -51,9 +51,9 @@ def run_experiment(records, embeddings, dataset: str, components: list[int]) -> 
         "components": list(components),
         "grid": grid,
     }
+    chosen = min(grid, key=lambda row: (-row["accuracy"], row["k"]))
     if has_validation:
-        chosen = min(grid, key=lambda row: (-row["accuracy"], row["k"]))
-        test = _evaluate(records, embeddings, fitted, chosen["k"], "test")
+        test = _evaluate(records, embeddings, fitted, chosen["k"], "test", collect_cases=True)
         result["selected"] = {
             "k": chosen["k"],
             "rule": "maior acurácia na validação; empate: menor k",
@@ -64,7 +64,45 @@ def run_experiment(records, embeddings, dataset: str, components: list[int]) -> 
             "retained_variance": test["retained_variance"],
             "reconstruction_error": test["reconstruction_error"],
         }
+        result["detail"] = _make_detail(test)
+    else:
+        detailed = _evaluate(records, embeddings, fitted, chosen["k"], "test", collect_cases=True)
+        result["detail"] = _make_detail(detailed)
     return result
+
+
+def run_all(results: list[dict]) -> dict:
+    """Junta os blocos detail de várias bases num panorama ponderado pelas consultas."""
+    datasets = []
+    errors = []
+    hits = n_queries = 0
+    for result in results:
+        detail = result["detail"]
+        datasets.append({
+            "dataset": result["dataset"],
+            "mode": result["mode"],
+            "k": detail["k"],
+            "hits": detail["hits"],
+            "n_queries": detail["n_queries"],
+            "accuracy": detail["accuracy"],
+            "retained_variance": detail["retained_variance"],
+            "reconstruction_error": detail["reconstruction_error"],
+            "n_errors": len(detail["errors"]),
+        })
+        hits += detail["hits"]
+        n_queries += detail["n_queries"]
+        errors.extend({"dataset": result["dataset"], **error} for error in detail["errors"])
+    return {
+        "datasets": datasets,
+        "overall": {
+            "hits": hits,
+            "n_queries": n_queries,
+            "accuracy": hits / n_queries if n_queries else 0.0,
+            "n_errors": len(errors),
+            "note": "acurácia ponderada pelas consultas de cada protocolo; as bases não são misturadas",
+        },
+        "errors": errors,
+    }
 
 
 def _rows(records, embeddings, chosen):
@@ -82,23 +120,38 @@ def _predict(gallery, gallery_labels, queries, k: int):
     return _nearest(projected_queries, projected_gallery, gallery_labels)
 
 
-def _evaluate(records, embeddings, fitted, k: int, partition: str) -> dict:
+def _evaluate(records, embeddings, fitted, k: int, partition: str, collect_cases: bool = False) -> dict:
     hits = n_queries = 0
     variances, errors, weights = [], [], []
+    cases = []
     for split, gallery, pca in fitted:
         rows = getattr(split, partition)
         queries, _ = _rows(records, embeddings, rows)
         queries = l2_normalize(queries)
         projected_gallery = l2_normalize(pca.transform(gallery, k))
         projected_queries = l2_normalize(pca.transform(queries, k))
-        predicted, _ = _nearest(projected_queries, projected_gallery, [r.identity_index for r in split.gallery])
+        names = {r.identity_index: r.identity_original for r in split.gallery}
+        predicted, scores = _nearest(
+            projected_queries, projected_gallery, [r.identity_index for r in split.gallery]
+        )
         truth = [r.identity_index for r in rows]
         hits += sum(label == true for label, true in zip(predicted, truth))
         n_queries += len(rows)
         variances.append(pca.retained_variance(k))
         errors.append(pca.reconstruction_error(queries, k))
         weights.append(len(rows))
-    return {
+        if collect_cases:
+            for record, label, score in zip(rows, predicted, scores):
+                cases.append({
+                    "path": record.path,
+                    "split": split.name,
+                    "true": record.identity_original,
+                    "predicted": names[label],
+                    "score": score,
+                    "condition": record.condition,
+                    "correct": label == record.identity_index,
+                })
+    result = {
         "k": k,
         "partition": partition,
         "hits": hits,
@@ -106,6 +159,46 @@ def _evaluate(records, embeddings, fitted, k: int, partition: str) -> dict:
         "accuracy": hits / n_queries,
         "retained_variance": float(np.mean(variances)),
         "reconstruction_error": float(np.average(errors, weights=weights)),
+    }
+    if collect_cases:
+        result["cases"] = cases
+    return result
+
+
+def _make_detail(row: dict) -> dict:
+    cases = row["cases"]
+    buckets: dict[str, list[int]] = {}
+    for case in cases:
+        hits_count, total = buckets.setdefault(case["condition"], [0, 0])
+        buckets[case["condition"]] = [hits_count + int(case["correct"]), total + 1]
+    return {
+        "k": row["k"],
+        "partition": row["partition"],
+        "hits": row["hits"],
+        "n_queries": row["n_queries"],
+        "accuracy": row["accuracy"],
+        "retained_variance": row["retained_variance"],
+        "reconstruction_error": row["reconstruction_error"],
+        "by_condition": {
+            condition: {
+                "hits": hits_count,
+                "n_queries": total,
+                "accuracy": hits_count / total,
+            }
+            for condition, (hits_count, total) in sorted(buckets.items())
+        },
+        "errors": [
+            {
+                "path": case["path"],
+                "split": case["split"],
+                "true": case["true"],
+                "predicted": case["predicted"],
+                "score": case["score"],
+                "condition": case["condition"],
+            }
+            for case in cases
+            if not case["correct"]
+        ],
     }
 
 

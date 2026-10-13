@@ -1,4 +1,4 @@
-"""Um comando: grade de k, JSON curto e identificação opcional de uma imagem."""
+"""Um comando: uma base, as três de uma vez, ou identificação de uma imagem."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .data import DATASETS, load_records
 from .embed import Embedder, load_embeddings
-from .identify import default_components, identify_query, run_experiment
+from .identify import default_components, identify_query, run_all, run_experiment
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,7 +18,8 @@ def main(argv=None):
         prog="recdev",
         description="Identificação facial: rede pré-treinada, PCA por SVD e cosseno.",
     )
-    parser.add_argument("--dataset", required=True, choices=DATASETS)
+    parser.add_argument("--all", action="store_true", help="avalia very-easy, easy e medium")
+    parser.add_argument("--dataset", choices=DATASETS)
     parser.add_argument("--root", type=Path, default=ROOT, help="pasta que contém as bases")
     parser.add_argument("--components", nargs="+", type=int, help="valores de k; omissão usa a grade da base")
     parser.add_argument("--image", type=Path, help="consulta avulsa; não grava galeria")
@@ -26,26 +27,58 @@ def main(argv=None):
     args.root = args.root.resolve()
     if not args.root.is_dir():
         parser.error(f"Pasta raiz inexistente: {args.root}")
-    components = args.components or default_components(args.dataset)
+    if args.all and args.dataset:
+        parser.error("--all é incompatível com --dataset")
+    if args.all and args.image:
+        parser.error("--all é incompatível com --image")
+    if args.all and args.components:
+        parser.error("--all usa a grade padrão de cada base; omita --components")
+    if not args.all and not args.dataset:
+        parser.error("informe --dataset ou --all")
     try:
-        records = load_records(args.dataset, args.root)
-        embedder = Embedder()
-        embeddings = load_embeddings(args.dataset, records, args.root, embedder)
-        result = run_experiment(records, embeddings, args.dataset, components)
-        _print_table(result)
         directory = args.root / "artifacts" / "runs"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{args.dataset}.json"
-        path.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if args.all:
+            embedder = Embedder()
+            results = []
+            for dataset in DATASETS:
+                result = _run_dataset(dataset, args.root, default_components(dataset), embedder)
+                _print_table(result)
+                path = _write_json(directory / f"{dataset}.json", result)
+                print(f"JSON: {path}")
+                results.append(result)
+            summary = run_all(results)
+            summary_path = _write_json(directory / "summary.json", summary)
+            _print_summary(summary)
+            print(f"JSON: {summary_path}")
+            return 0
+        components = args.components or default_components(args.dataset)
+        embedder = Embedder()
+        result = _run_dataset(args.dataset, args.root, components, embedder)
+        _print_table(result)
+        path = _write_json(directory / f"{args.dataset}.json", result)
         print(f"JSON: {path}")
         if args.image:
             k = _query_k(components, result)
+            records = load_records(args.dataset, args.root)
+            embeddings = load_embeddings(args.dataset, records, args.root, embedder)
             query = _query_vector(args.image, args.root, records, embeddings, embedder)
             identity, score = identify_query(records, embeddings, args.dataset, query, k)
             print(f"Consulta: identidade {identity}, score {score:.6f}, k={k}")
     except (ValueError, FileNotFoundError) as error:
         parser.error(str(error))
     return 0
+
+
+def _run_dataset(dataset, root: Path, components, embedder: Embedder) -> dict:
+    records = load_records(dataset, root)
+    embeddings = load_embeddings(dataset, records, root, embedder)
+    return run_experiment(records, embeddings, dataset, components)
+
+
+def _write_json(path: Path, payload) -> Path:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
 
 
 def _query_k(components, result) -> int:
@@ -90,6 +123,31 @@ def _print_table(result) -> None:
         print(
             f"Escolha na validação: k={selected['k']} ({selected['validation_accuracy']:.2%}); "
             f"teste: {selected['test_hits']}/{selected['test_queries']} = {selected['test_accuracy']:.2%}"
+        )
+
+
+def _print_summary(summary) -> None:
+    print("resumo")
+    print(f"{'base':<10}  {'acertos':>12}  {'acurácia':>8}  {'k':>4}  {'erros':>5}")
+    for row in summary["datasets"]:
+        print(
+            f"{row['dataset']:<10}  {row['hits']:>4}/{row['n_queries']:<4}  "
+            f"{row['accuracy']:>8.2%}  {row['k']:>4}  {row['n_errors']:>5}"
+        )
+    overall = summary["overall"]
+    print(
+        f"{'geral':<10}  {overall['hits']:>4}/{overall['n_queries']:<4}  "
+        f"{overall['accuracy']:>8.2%}"
+    )
+    errors = summary["errors"]
+    print(f"erros ({len(errors)}):")
+    if not errors:
+        print("  nenhum")
+        return
+    for error in errors:
+        print(
+            f"  {error['path']}  verdade={error['true']}  "
+            f"predito={error['predicted']}  score={error['score']:.4f}"
         )
 
 
