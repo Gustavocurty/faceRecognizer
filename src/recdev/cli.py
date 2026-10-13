@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .data import DATASETS, load_records
+from .data import DATASETS, DATASET_ALIASES, load_records
 from .embed import Embedder, load_embeddings
 from .identify import default_components, identify_query, run_all, run_experiment
 
@@ -18,8 +18,9 @@ def main(argv=None):
         prog="recdev",
         description="Identificação facial: rede pré-treinada, PCA por SVD e cosseno.",
     )
-    parser.add_argument("--all", action="store_true", help="avalia very-easy, easy, medium e hard")
-    parser.add_argument("--dataset", choices=DATASETS)
+    all_choices = tuple(dict.fromkeys(list(DATASETS) + list(DATASET_ALIASES.keys())))
+    parser.add_argument("--all", action="store_true", help="avalia todas as bases cadastradas")
+    parser.add_argument("--dataset", choices=all_choices)
     parser.add_argument("--root", type=Path, default=ROOT, help="pasta que contém as bases")
     parser.add_argument("--components", nargs="+", type=int, help="valores de k; omissão usa a grade da base")
     parser.add_argument("--image", type=Path, help="consulta avulsa; não grava galeria")
@@ -52,18 +53,19 @@ def main(argv=None):
             _print_summary(summary)
             print(f"JSON: {summary_path}")
             return 0
-        components = args.components or default_components(args.dataset)
+        dataset = DATASET_ALIASES.get(args.dataset, args.dataset)
+        components = args.components or default_components(dataset)
         embedder = Embedder()
-        result = _run_dataset(args.dataset, args.root, components, embedder)
+        result = _run_dataset(dataset, args.root, components, embedder)
         _print_table(result)
-        path = _write_json(directory / f"{args.dataset}.json", result)
+        path = _write_json(directory / f"{dataset}.json", result)
         print(f"JSON: {path}")
         if args.image:
             k = _query_k(components, result)
-            records = load_records(args.dataset, args.root)
-            embeddings = load_embeddings(args.dataset, records, args.root, embedder)
+            records = load_records(dataset, args.root)
+            embeddings = load_embeddings(dataset, records, args.root, embedder)
             query = _query_vector(args.image, args.root, records, embeddings, embedder)
-            identity, score = identify_query(records, embeddings, args.dataset, query, k)
+            identity, score = identify_query(records, embeddings, dataset, query, k)
             print(f"Consulta: identidade {identity}, score {score:.6f}, k={k}")
     except (ValueError, FileNotFoundError) as error:
         parser.error(str(error))

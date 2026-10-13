@@ -48,25 +48,31 @@ BASES
   hard:      50 pessoas, 700 imagens (14 poses FEI). Mesma galeria e
               validação do medium; teste nas 11 poses restantes (550).
               O nome local já é o código FEI; não há mapping.
+  fb1-inner/outer: 5 pessoas, 45 imagens (Facebook Faces 1). Galeria = fotos
+              1 e 2 (10); validação = foto 3 (5); teste = fotos 4..9 (30).
+  fb2-inner/outer: 5 pessoas, 50 imagens (Facebook Faces 2). Galeria = fotos
+              1 e 2 (10); validação = foto 3 (5); teste = fotos 4..10 (35).
+              Aliases: fb1, fb2, facebook-1, facebook-2.
 
 COMANDOS
 --------
 
   python -m recdev --all
   python -m recdev --dataset medium
+  python -m recdev --dataset fb1
   python -m recdev --dataset easy --components 1 2 3 4
   python -m recdev --dataset medium --image medium/1-4.jpg --components 8
 
-A grade padrão é 1 2 3 4 nas bases pequenas e 8 16 32 64 no medium e no hard.
-A saída é uma tabela (k, acertos, variância retida, erro de reconstrução)
-e um JSON em artifacts/runs/{dataset}.json, agora com o bloco detail no
-k representativo (acurácia, por condição, lista de erros e análise). A
-análise aponta o que interferiu: k (variância retida), margem entre o
-1º e o 2º cosseno, e condição/pose da consulta — para justificar acertos
-e erros. --all percorre as quatro bases, imprime o panorama e grava
+A grade padrão é 1 2 3 4 nas bases pequenas (inclusive fb1/fb2) e 8 16 32 64
+no medium e no hard. A saída é uma tabela (k, acertos, variância retida,
+erro de reconstrução) e um JSON em artifacts/runs/{dataset}.json, com o
+bloco detail no k representativo (acurácia, por condição, lista de erros
+e análise). A análise aponta o que interferiu: k (variância retida), margem
+entre o 1º e o 2º cosseno, e condição/pose da consulta — para justificar
+acertos e erros. --all percorre todas as bases, imprime o panorama e grava
 artifacts/runs/summary.json.
 --image usa a galeria do primeiro split, imprime a identidade e não grava
-modelo. No medium, se houver vários k, a consulta usa o k escolhido na
+modelo. No medium/hard/fb, se houver vários k, a consulta usa o k escolhido na
 validação. --all é incompatível com --dataset, --image e --components.
 
 REFERÊNCIA DE 16/09/2026

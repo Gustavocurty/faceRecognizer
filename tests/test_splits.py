@@ -28,3 +28,18 @@ def test_hard_splits_are_disjoint():
     records = load_records("hard", ROOT)
     (split,) = make_splits(records, "hard")
     _assert_disjoint_cover(split, (100, 50, 550), 700)
+
+
+def test_fb1_splits_are_disjoint():
+    for name in ("fb1-inner", "fb1-outer"):
+        records = load_records(name, ROOT)
+        (split,) = make_splits(records, name)
+        _assert_disjoint_cover(split, (10, 5, 30), 45)
+
+
+def test_fb2_splits_are_disjoint():
+    for name in ("fb2-inner", "fb2-outer"):
+        records = load_records(name, ROOT)
+        (split,) = make_splits(records, name)
+        _assert_disjoint_cover(split, (10, 5, 35), 50)
+

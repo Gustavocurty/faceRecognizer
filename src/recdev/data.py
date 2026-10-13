@@ -8,11 +8,42 @@ from pathlib import Path
 
 IMG_SUFFIXES = {".jpg", ".jpeg", ".png"}
 CONDITIONS = ("clean", "dark", "noise", "noise-dark")
-DATASETS = ("very-easy", "easy", "medium", "hard")
+DATASETS = (
+    "very-easy",
+    "easy",
+    "medium",
+    "hard",
+    "fb1-inner",
+    "fb1-outer",
+    "fb2-inner",
+    "fb2-outer",
+)
+DATASET_ALIASES = {
+    "fb1": "fb1-inner",
+    "fb2": "fb2-inner",
+    "facebook-1": "fb1-inner",
+    "facebook-2": "fb2-inner",
+    "facebookfaces": "fb1-inner",
+    "facebookfaces-2": "fb2-inner",
+}
+DATASET_REL_DIRS = {
+    "very-easy": Path("very-easy"),
+    "easy": Path("easy"),
+    "medium": Path("medium"),
+    "hard": Path("hard"),
+    "fb1-inner": Path("extras/facebookfaces/crop-inner"),
+    "fb1-outer": Path("extras/facebookfaces/crop-outer"),
+    "fb2-inner": Path("extras/facebookfaces-2/crop-inner"),
+    "fb2-outer": Path("extras/facebookfaces-2/crop-outer"),
+}
 HARD_CODES = ("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14")
 HARD_GALLERY = ("04", "06")
 HARD_VALIDATION = ("05",)
 HARD_TEST = ("01", "02", "03", "07", "08", "09", "10", "11", "12", "13", "14")
+FB1_CODES = tuple(str(i) for i in range(1, 10))
+FB2_CODES = tuple(str(i) for i in range(1, 11))
+FB_GALLERY = ("1", "2")
+FB_VALIDATION = ("3",)
 
 _NAME_RE = re.compile(r"^(?P<identity>\d+)-(?P<photo_id>\d+)\.(jpg|jpeg|png)$")
 
@@ -69,9 +100,10 @@ def load_mapping(dataset_dir: Path) -> dict[str, str]:
 
 
 def load_records(dataset: str, root: Path) -> list[Record]:
-    if dataset not in DATASETS:
+    resolved = DATASET_ALIASES.get(dataset, dataset)
+    if resolved not in DATASET_REL_DIRS:
         raise ValueError(f"Base desconhecida: {dataset}")
-    dataset_dir = root / dataset
+    dataset_dir = root / DATASET_REL_DIRS[resolved]
     if not dataset_dir.is_dir():
         raise FileNotFoundError(f"Dataset não encontrado: {dataset_dir}")
     mapping = load_mapping(dataset_dir)
@@ -88,13 +120,17 @@ def load_records(dataset: str, root: Path) -> list[Record]:
         identity_original = match.group("identity")
         if identity_original not in identity_by_original:
             identity_by_original[identity_original] = len(identity_by_original)
-        fei_name = mapping.get(path.name, path.name)
-        try:
-            source_photo, condition = parse_fei_name(fei_name)
-        except ValueError as error:
-            if path.name not in mapping:
-                raise ValueError(f"Imagem sem mapeamento FEI: {path.name}") from error
-            raise
+        if resolved.startswith("fb"):
+            source_photo = match.group("photo_id")
+            condition = "crop-inner" if "inner" in resolved else "crop-outer"
+        else:
+            fei_name = mapping.get(path.name, path.name)
+            try:
+                source_photo, condition = parse_fei_name(fei_name)
+            except ValueError as error:
+                if path.name not in mapping:
+                    raise ValueError(f"Imagem sem mapeamento FEI: {path.name}") from error
+                raise
         records.append(Record(
             path=path.relative_to(root).as_posix(),
             identity_original=identity_original,
@@ -107,8 +143,9 @@ def load_records(dataset: str, root: Path) -> list[Record]:
 
 def make_splits(records: list[Record], dataset: str) -> list[Split]:
     """Galeria, validação e teste sem cruzar a mesma foto-base."""
-    if dataset in ("very-easy", "easy"):
-        conditions = ("clean",) if dataset == "very-easy" else CONDITIONS
+    resolved = DATASET_ALIASES.get(dataset, dataset)
+    if resolved in ("very-easy", "easy"):
+        conditions = ("clean",) if resolved == "very-easy" else CONDITIONS
         expected = {(source, condition) for source in ("a", "b") for condition in conditions}
         _check_sources(records, expected)
         pairs = (("a", "b"), ("b", "a"))
@@ -121,7 +158,7 @@ def make_splits(records: list[Record], dataset: str) -> list[Split]:
             )
             for source, other in pairs
         ]
-    elif dataset == "medium":
+    elif resolved == "medium":
         codes = ("04", "05", "06", "11", "12", "13", "14")
         _check_sources(records, {(source, f"fei-{source}") for source in codes})
         splits = [Split(
@@ -130,13 +167,23 @@ def make_splits(records: list[Record], dataset: str) -> list[Split]:
             validation=[r for r in records if r.source_photo == "05"],
             test=[r for r in records if r.source_photo in ("11", "12", "13", "14")],
         )]
-    elif dataset == "hard":
+    elif resolved == "hard":
         _check_sources(records, {(source, f"fei-{source}") for source in HARD_CODES})
         splits = [Split(
             name="hard-04-06-gallery-05-validation-remaining-test",
             gallery=[r for r in records if r.source_photo in HARD_GALLERY],
             validation=[r for r in records if r.source_photo in HARD_VALIDATION],
             test=[r for r in records if r.source_photo in HARD_TEST],
+        )]
+    elif resolved.startswith("fb"):
+        codes = FB1_CODES if "fb1" in resolved else FB2_CODES
+        condition = "crop-inner" if "inner" in resolved else "crop-outer"
+        _check_sources(records, {(source, condition) for source in codes})
+        splits = [Split(
+            name=f"{resolved}-1-2-gallery-3-val-remaining-test",
+            gallery=[r for r in records if r.source_photo in FB_GALLERY],
+            validation=[r for r in records if r.source_photo in FB_VALIDATION],
+            test=[r for r in records if int(r.source_photo) >= 4],
         )]
     else:
         raise ValueError(f"Protocolo não implementado: {dataset}")
